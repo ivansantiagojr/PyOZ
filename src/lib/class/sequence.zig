@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const py = @import("../python.zig");
+const ft = @import("threading.zig");
 const conversion = @import("../conversion.zig");
 const slots = py.slots;
 
@@ -27,10 +28,10 @@ pub fn SequenceProtocol(comptime _: [*:0]const u8, comptime T: type, comptime Pa
         fn makeSequenceMethods() py.PySequenceMethods {
             var sm: py.PySequenceMethods = std.mem.zeroes(py.PySequenceMethods);
 
-            if (@hasDecl(T, "__len__")) sm.sq_length = @ptrCast(&py_sq_length);
-            if (@hasDecl(T, "__getitem__")) sm.sq_item = @ptrCast(&py_sq_item);
-            if (@hasDecl(T, "__setitem__") or @hasDecl(T, "__delitem__")) sm.sq_ass_item = @ptrCast(&py_sq_ass_item);
-            if (@hasDecl(T, "__contains__")) sm.sq_contains = @ptrCast(&py_sq_contains);
+            if (@hasDecl(T, "__len__")) sm.sq_length = @ptrCast(ft.locked(T, py_sq_length));
+            if (@hasDecl(T, "__getitem__")) sm.sq_item = @ptrCast(ft.locked(T, py_sq_item));
+            if (@hasDecl(T, "__setitem__") or @hasDecl(T, "__delitem__")) sm.sq_ass_item = @ptrCast(ft.locked(T, py_sq_ass_item));
+            if (@hasDecl(T, "__contains__")) sm.sq_contains = @ptrCast(ft.locked(T, py_sq_contains));
 
             return sm;
         }
@@ -247,19 +248,19 @@ pub fn SequenceProtocol(comptime _: [*:0]const u8, comptime T: type, comptime Pa
             var idx = start_idx;
 
             if (@hasDecl(T, "__len__")) {
-                slot_array[idx] = .{ .slot = slots.sq_length, .pfunc = @ptrCast(@constCast(&py_sq_length)) };
+                slot_array[idx] = .{ .slot = slots.sq_length, .pfunc = @ptrCast(@constCast(ft.locked(T, py_sq_length))) };
                 idx += 1;
             }
             if (@hasDecl(T, "__getitem__")) {
-                slot_array[idx] = .{ .slot = slots.sq_item, .pfunc = @ptrCast(@constCast(&py_sq_item)) };
+                slot_array[idx] = .{ .slot = slots.sq_item, .pfunc = @ptrCast(@constCast(ft.locked(T, py_sq_item))) };
                 idx += 1;
             }
             if (@hasDecl(T, "__setitem__") or @hasDecl(T, "__delitem__")) {
-                slot_array[idx] = .{ .slot = slots.sq_ass_item, .pfunc = @ptrCast(@constCast(&py_sq_ass_item)) };
+                slot_array[idx] = .{ .slot = slots.sq_ass_item, .pfunc = @ptrCast(@constCast(ft.locked(T, py_sq_ass_item))) };
                 idx += 1;
             }
             if (@hasDecl(T, "__contains__")) {
-                slot_array[idx] = .{ .slot = slots.sq_contains, .pfunc = @ptrCast(@constCast(&py_sq_contains)) };
+                slot_array[idx] = .{ .slot = slots.sq_contains, .pfunc = @ptrCast(@constCast(ft.locked(T, py_sq_contains))) };
                 idx += 1;
             }
 

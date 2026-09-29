@@ -27,8 +27,8 @@ pub inline fn PyModule_AddStringConstant(module: *PyObject, name: [*:0]const u8,
 }
 
 pub inline fn PyModule_AddType(module: *PyObject, type_obj: *PyTypeObject) c_int {
-    // PyModule_AddType was added in Python 3.9 but may not be in Limited API
-    // Use PyModule_AddObject as fallback
+    // PyModule_AddType is available on every supported version (3.10+, also in
+    // the Limited API); the fallback only covers headers that do not declare it
     if (@hasDecl(c, "PyModule_AddType")) {
         return c.PyModule_AddType(module, type_obj);
     } else {

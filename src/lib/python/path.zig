@@ -13,24 +13,21 @@ const tuple = @import("tuple.zig");
 const PyTuple_Pack = tuple.PyTuple_Pack;
 const typecheck = @import("typecheck.zig");
 const PyUnicode_Check = typecheck.PyUnicode_Check;
+const lazy = @import("lazy.zig");
 
 // ============================================================================
 // Path operations (pathlib.Path)
 // ============================================================================
 
-var pathlib_path_type: ?*PyObject = null;
+var pathlib_path_type: lazy.LazyObject = .{};
 
-/// Get the pathlib.Path type (lazily imported)
+/// Get the pathlib.Path type (lazily imported; free-threading safe)
 fn getPathType() ?*PyObject {
-    if (pathlib_path_type) |t| return t;
-
-    // Import pathlib module
+    if (pathlib_path_type.get()) |t| return t;
     const pathlib = c.PyImport_ImportModule("pathlib") orelse return null;
     defer Py_DecRef(pathlib);
-
-    // Get Path class
-    pathlib_path_type = c.PyObject_GetAttrString(pathlib, "Path");
-    return pathlib_path_type;
+    const t = c.PyObject_GetAttrString(pathlib, "Path") orelse return null;
+    return pathlib_path_type.publish(t);
 }
 
 /// Create a pathlib.Path from a string

@@ -6,9 +6,13 @@ const project = @import("project.zig");
 const builder = @import("builder.zig");
 const wheel = @import("wheel.zig");
 const symreader = @import("symreader.zig");
+const sys = @import("sys.zig");
+const target_mod = @import("target.zig");
+
+pub const Ctx = sys.Ctx;
 
 /// Initialize a new PyOZ project
-pub fn init(allocator: std.mem.Allocator, args: []const []const u8) !void {
+pub fn init(ctx: Ctx, args: []const []const u8) !void {
     var project_name: ?[]const u8 = null;
     var show_help = false;
     var in_current_dir = false;
@@ -65,26 +69,43 @@ pub fn init(allocator: std.mem.Allocator, args: []const []const u8) !void {
         return;
     }
 
-    try project.create(allocator, project_name, in_current_dir, local_pyoz_path, package_layout);
+    try project.create(ctx, project_name, in_current_dir, local_pyoz_path, package_layout);
 }
 
 /// Build the extension module and create a wheel
-pub fn build(allocator: std.mem.Allocator, args: []const []const u8) !void {
-    var release = false;
+pub fn build(ctx: Ctx, args: []const []const u8) !void {
+    const allocator = ctx.gpa;
+    var opts: wheel.WheelOptions = .{};
     var show_help = false;
-    var generate_stubs = true;
+    var targets: std.ArrayList(target_mod.Target) = .empty;
+    defer targets.deinit(allocator);
 
-    for (args) |arg| {
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
         if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             show_help = true;
         } else if (std.mem.eql(u8, arg, "--release") or std.mem.eql(u8, arg, "-r")) {
-            release = true;
+            opts.release = true;
         } else if (std.mem.eql(u8, arg, "--debug") or std.mem.eql(u8, arg, "-d")) {
-            release = false;
+            opts.release = false;
         } else if (std.mem.eql(u8, arg, "--no-stubs")) {
-            generate_stubs = false;
+            opts.stubs = false;
         } else if (std.mem.eql(u8, arg, "--stubs")) {
-            generate_stubs = true;
+            opts.stubs = true;
+        } else if (std.mem.eql(u8, arg, "--native")) {
+            opts.native = true;
+        } else if (optionValue(args, &i, "--target")) |value| {
+            try parseTargets(allocator, &targets, value orelse return error.MissingTarget);
+        } else if (optionValue(args, &i, "--python")) |value| {
+            const v = value orelse return error.MissingPython;
+            opts.python = target_mod.Python.parse(v) catch |err| {
+                std.debug.print("Error: invalid --python '{s}' (expected e.g. 3.12 or 3.14t, 3.10 or newer)\n", .{v});
+                return err;
+            };
+        } else {
+            std.debug.print("Error: unknown option '{s}' (see pyoz build --help)\n", .{arg});
+            return error.UnknownOption;
         }
     }
 
@@ -94,25 +115,78 @@ pub fn build(allocator: std.mem.Allocator, args: []const []const u8) !void {
             \\
             \\Build the extension module and create a wheel package.
             \\
-            \\Options:
-            \\  -d, --debug    Build in debug mode (default)
-            \\  -r, --release  Build in release mode (optimized)
-            \\  --stubs        Generate .pyi type stub file (default)
-            \\  --no-stubs     Do not generate .pyi type stub file
-            \\  -h, --help     Show this help message
+            \\Wheels are portable: built for a baseline CPU, glibc 2.17 on Linux
+            \\(manylinux_2_17) and macOS 13.0, with the platform tag read from the
+            \\built binary.
             \\
-            \\The wheel will be placed in the dist/ directory.
+            \\Options:
+            \\  -d, --debug          Build in debug mode (default)
+            \\  -r, --release        Build in release mode (optimized)
+            \\  --target <targets>   Build for other platforms: comma-separated
+            \\                       x86_64-linux, aarch64-linux, x86_64-macos,
+            \\                       aarch64-macos, x86_64-windows, aarch64-windows,
+            \\                       or "all" (default: this machine's platform)
+            \\  --python <version>   CPython to build for, e.g. 3.12 or 3.14t
+            \\                       (default: the python3 on PATH)
+            \\  --native             Build for this machine's CPU only (not for
+            \\                       distribution)
+            \\  --stubs              Generate .pyi type stub file (default)
+            \\  --no-stubs           Do not generate .pyi type stub file
+            \\  -h, --help           Show this help message
+            \\
+            \\Headers for other platforms or Python versions are downloaded once
+            \\(python-build-standalone) and cached.
+            \\The wheels are placed in the dist/ directory.
             \\
         , .{});
         return;
     }
 
-    const wheel_path = try wheel.buildWheel(allocator, release, generate_stubs);
-    defer allocator.free(wheel_path);
+    opts.targets = targets.items;
+    const paths = try wheel.buildWheels(ctx, opts);
+    defer {
+        for (paths) |p| allocator.free(p);
+        allocator.free(paths);
+    }
+}
+
+/// `--name value` or `--name=value`: returns null if `args[i.*]` is another
+/// option, `.{null}` if the value is missing.
+fn optionValue(args: []const []const u8, i: *usize, comptime name: []const u8) ??[]const u8 {
+    const arg = args[i.*];
+    if (std.mem.startsWith(u8, arg, name ++ "=")) return arg[name.len + 1 ..];
+    if (!std.mem.eql(u8, arg, name)) return null;
+    if (i.* + 1 >= args.len) {
+        std.debug.print("Error: {s} needs a value\n", .{name});
+        return @as(?[]const u8, null);
+    }
+    i.* += 1;
+    return args[i.*];
+}
+
+/// Comma-separated targets or "all"; duplicates are ignored.
+pub fn parseTargets(allocator: std.mem.Allocator, out: *std.ArrayList(target_mod.Target), value: []const u8) !void {
+    var it = std.mem.splitScalar(u8, value, ',');
+    while (it.next()) |raw| {
+        const name = std.mem.trim(u8, raw, " ");
+        if (name.len == 0) continue;
+        const parsed: []const target_mod.Target = if (std.mem.eql(u8, name, "all"))
+            &target_mod.Target.all
+        else
+            &.{target_mod.Target.parse(name) catch |err| {
+                std.debug.print("Error: unknown target '{s}' (e.g. x86_64-linux, aarch64-macos, x86_64-windows, all)\n", .{name});
+                return err;
+            }};
+        for (parsed) |t| {
+            for (out.items) |existing| {
+                if (existing.eql(t)) break;
+            } else try out.append(allocator, t);
+        }
+    }
 }
 
 /// Build and install in development mode
-pub fn develop(allocator: std.mem.Allocator, args: []const []const u8) !void {
+pub fn develop(ctx: Ctx, args: []const []const u8) !void {
     var show_help = false;
 
     for (args) |arg| {
@@ -135,11 +209,11 @@ pub fn develop(allocator: std.mem.Allocator, args: []const []const u8) !void {
         return;
     }
 
-    try builder.developMode(allocator);
+    try builder.developMode(ctx);
 }
 
 /// Publish wheel(s) to PyPI
-pub fn publish(allocator: std.mem.Allocator, args: []const []const u8) !void {
+pub fn publish(ctx: Ctx, args: []const []const u8) !void {
     var show_help = false;
     var test_pypi = false;
 
@@ -173,11 +247,11 @@ pub fn publish(allocator: std.mem.Allocator, args: []const []const u8) !void {
         return;
     }
 
-    try wheel.publish(allocator, test_pypi);
+    try wheel.publish(ctx, test_pypi);
 }
 
 /// Run embedded tests
-pub fn runTests(allocator: std.mem.Allocator, args: []const []const u8) !void {
+pub fn runTests(ctx: Ctx, args: []const []const u8) !void {
     var release = false;
     var show_help = false;
     var verbose = false;
@@ -207,141 +281,11 @@ pub fn runTests(allocator: std.mem.Allocator, args: []const []const u8) !void {
         return;
     }
 
-    // Load project config to detect package mode
-    var config = project.toml.loadPyProject(allocator) catch |err| {
-        if (err == error.PyProjectNotFound) {
-            std.debug.print("Error: pyproject.toml not found. Run 'pyoz init' first.\n", .{});
-        }
-        return err;
-    };
-    defer config.deinit(allocator);
-
-    // Detect package mode: py-packages contains project name
-    const is_package_mode = blk: {
-        for (config.py_packages.items) |pkg| {
-            if (std.mem.eql(u8, pkg, config.name)) break :blk true;
-        }
-        break :blk false;
-    };
-
-    // Build the module
-    var build_result = try builder.buildModule(allocator, release);
-    defer build_result.deinit(allocator);
-
-    // In package mode, copy .pyd/.so into the package directory so `import ravn` works
-    if (is_package_mode) {
-        const pkg_module_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ config.name, build_result.module_name });
-        defer allocator.free(pkg_module_path);
-        std.fs.cwd().copyFile(build_result.module_path, std.fs.cwd(), pkg_module_path, .{}) catch |err| {
-            std.debug.print("Warning: Could not copy module into package directory: {s}\n", .{@errorName(err)});
-        };
-    }
-
-    // Extract tests from the compiled module
-    const test_content = symreader.extractTests(allocator, build_result.module_path) catch |err| {
-        std.debug.print("Error: Could not extract tests: {}\n", .{err});
-        return err;
-    };
-
-    if (test_content == null or test_content.?.len == 0) {
-        std.debug.print("\nNo tests found in module.\n", .{});
-        std.debug.print("Add .tests to your pyoz.module() config:\n\n", .{});
-        std.debug.print("  .tests = &.{{\n", .{});
-        std.debug.print("      pyoz.@\"test\"(\"my test\",\n", .{});
-        std.debug.print("          \\\\assert mymod.add(2, 3) == 5\n", .{});
-        std.debug.print("      ),\n", .{});
-        std.debug.print("  }},\n", .{});
-        return;
-    }
-    defer allocator.free(test_content.?);
-
-    // Write test file next to the built module
-    const test_file = if (builtin.os.tag == .windows) "zig-out/bin/__pyoz_test.py" else "zig-out/lib/__pyoz_test.py";
-    {
-        const cwd = std.fs.cwd();
-        const f = cwd.createFile(test_file, .{}) catch |err| {
-            std.debug.print("Error: Could not write test file: {s}\n", .{@errorName(err)});
-            return err;
-        };
-        defer f.close();
-        f.writeAll(test_content.?) catch |err| {
-            std.debug.print("Error: Could not write test file: {s}\n", .{@errorName(err)});
-            return err;
-        };
-    }
-
-    // Syntax-check the generated test file before running
-    const python_cmd = builder.getPythonCommand();
-    {
-        const syntax_argv = [_][]const u8{ python_cmd, "-m", "py_compile", test_file };
-        var syntax_check = std.process.Child.init(&syntax_argv, allocator);
-        syntax_check.stderr_behavior = .Inherit;
-        syntax_check.stdout_behavior = .Ignore;
-        const syntax_term = try syntax_check.spawnAndWait();
-        if (syntax_term.Exited != 0) {
-            std.debug.print("\nSyntax error in generated test file.\n", .{});
-            std.debug.print("Check the Python code in your pyoz.@\"test\"() definitions.\n", .{});
-            std.process.exit(1);
-        }
-    }
-
-    std.debug.print("\nRunning tests...\n\n", .{});
-    const path_sep = if (builtin.os.tag == .windows) ";" else ":";
-
-    // Build PYTHONPATH
-    const existing_pp = std.process.getEnvVarOwned(allocator, "PYTHONPATH") catch "";
-    defer if (existing_pp.len > 0) allocator.free(existing_pp);
-
-    // On Windows, Zig places DLLs (.pyd) in zig-out/bin/, so use the correct directory
-    const out_dir = if (builtin.os.tag == .windows) "zig-out/bin" else "zig-out/lib";
-    // In package mode, also add project root so `import ravn` finds ravn/__init__.py
-    const new_pp = if (is_package_mode)
-        if (existing_pp.len > 0)
-            try std.fmt.allocPrint(allocator, ".{s}{s}{s}{s}", .{ path_sep, out_dir, path_sep, existing_pp })
-        else
-            try std.fmt.allocPrint(allocator, ".{s}{s}", .{ path_sep, out_dir })
-    else if (existing_pp.len > 0)
-        try std.fmt.allocPrint(allocator, "{s}{s}{s}", .{ out_dir, path_sep, existing_pp })
-    else
-        try allocator.dupe(u8, out_dir);
-    defer allocator.free(new_pp);
-
-    // Build argv
-    var argv_buf: [6][]const u8 = undefined;
-    var argc: usize = 0;
-    argv_buf[argc] = python_cmd;
-    argc += 1;
-    argv_buf[argc] = "-m";
-    argc += 1;
-    argv_buf[argc] = "unittest";
-    argc += 1;
-    argv_buf[argc] = test_file;
-    argc += 1;
-    if (verbose) {
-        argv_buf[argc] = "-v";
-        argc += 1;
-    }
-
-    var env_map = std.process.getEnvMap(allocator) catch |err| {
-        std.debug.print("Error: Could not get environment: {s}\n", .{@errorName(err)});
-        return err;
-    };
-    defer env_map.deinit();
-    try env_map.put("PYTHONPATH", new_pp);
-
-    var child = std.process.Child.init(argv_buf[0..argc], allocator);
-    child.env_map = &env_map;
-    child.stderr_behavior = .Inherit;
-    child.stdout_behavior = .Inherit;
-
-    const term = try child.spawnAndWait();
-    if (term.Exited != 0) {
-        std.process.exit(1);
-    }
+    try runEmbedded(ctx, .@"test", release, verbose);
 }
 
 /// Run embedded benchmarks
-pub fn runBench(allocator: std.mem.Allocator, args: []const []const u8) !void {
+pub fn runBench(ctx: Ctx, args: []const []const u8) !void {
     var show_help = false;
 
     for (args) |arg| {
@@ -364,8 +308,60 @@ pub fn runBench(allocator: std.mem.Allocator, args: []const []const u8) !void {
         return;
     }
 
-    // Load project config to detect package mode
-    var config = project.toml.loadPyProject(allocator) catch |err| {
+    // Always build in release mode for benchmarks
+    try runEmbedded(ctx, .bench, true, false);
+}
+
+const EmbeddedKind = enum {
+    @"test",
+    bench,
+
+    fn noun(k: EmbeddedKind) []const u8 {
+        return switch (k) {
+            .@"test" => "test",
+            .bench => "benchmark",
+        };
+    }
+
+    fn scriptName(k: EmbeddedKind) []const u8 {
+        return switch (k) {
+            .@"test" => "__pyoz_test.py",
+            .bench => "__pyoz_bench.py",
+        };
+    }
+
+    fn printHowTo(k: EmbeddedKind) void {
+        switch (k) {
+            .@"test" => {
+                std.debug.print("\nNo tests found in module.\n", .{});
+                std.debug.print("Add .tests to your pyoz.module() config:\n\n", .{});
+                std.debug.print("  .tests = &.{{\n", .{});
+                std.debug.print("      pyoz.@\"test\"(\"my test\",\n", .{});
+                std.debug.print("          \\\\assert mymod.add(2, 3) == 5\n", .{});
+                std.debug.print("      ),\n", .{});
+                std.debug.print("  }},\n", .{});
+            },
+            .bench => {
+                std.debug.print("\nNo benchmarks found in module.\n", .{});
+                std.debug.print("Add .benchmarks to your pyoz.module() config:\n\n", .{});
+                std.debug.print("  .benchmarks = &.{{\n", .{});
+                std.debug.print("      pyoz.bench(\"my benchmark\",\n", .{});
+                std.debug.print("          \\\\mymod.add(100, 200)\n", .{});
+                std.debug.print("      ),\n", .{});
+                std.debug.print("  }},\n", .{});
+            },
+        }
+    }
+};
+
+/// Shared pipeline for `pyoz test` and `pyoz bench`: build, extract the embedded
+/// Python script from the module, syntax-check it, and run it with PYTHONPATH set.
+fn runEmbedded(ctx: Ctx, kind: EmbeddedKind, release: bool, verbose: bool) !void {
+    const allocator = ctx.gpa;
+    const io = ctx.io;
+    const cwd = std.Io.Dir.cwd();
+
+    var config = project.toml.loadPyProject(allocator, io) catch |err| {
         if (err == error.PyProjectNotFound) {
             std.debug.print("Error: pyproject.toml not found. Run 'pyoz init' first.\n", .{});
         }
@@ -373,110 +369,83 @@ pub fn runBench(allocator: std.mem.Allocator, args: []const []const u8) !void {
     };
     defer config.deinit(allocator);
 
-    // Detect package mode: py-packages contains project name
-    const is_package_mode = blk: {
-        for (config.py_packages.items) |pkg| {
-            if (std.mem.eql(u8, pkg, config.name)) break :blk true;
-        }
-        break :blk false;
-    };
+    // Package mode: py-packages contains the project name
+    const is_package_mode = for (config.py_packages.items) |pkg| {
+        if (std.mem.eql(u8, pkg, config.name)) break true;
+    } else false;
 
-    // Always build in release mode for benchmarks
-    var build_result = try builder.buildModule(allocator, true);
+    var build_result = try builder.buildModule(ctx, .{ .release = release });
     defer build_result.deinit(allocator);
 
-    // In package mode, copy .pyd/.so into the package directory so `import ravn` works
+    // In package mode, copy .pyd/.so into the package directory so `import pkg` works
     if (is_package_mode) {
         const pkg_module_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ config.name, build_result.module_name });
         defer allocator.free(pkg_module_path);
-        std.fs.cwd().copyFile(build_result.module_path, std.fs.cwd(), pkg_module_path, .{}) catch |err| {
+        cwd.copyFile(build_result.module_path, cwd, pkg_module_path, io, .{}) catch |err| {
             std.debug.print("Warning: Could not copy module into package directory: {s}\n", .{@errorName(err)});
         };
     }
 
-    // Extract benchmarks from the compiled module
-    const bench_content = symreader.extractBenchmarks(allocator, build_result.module_path) catch |err| {
-        std.debug.print("Error: Could not extract benchmarks: {}\n", .{err});
+    const extracted = switch (kind) {
+        .@"test" => symreader.extractTests(io, allocator, build_result.module_path),
+        .bench => symreader.extractBenchmarks(io, allocator, build_result.module_path),
+    } catch |err| {
+        std.debug.print("Error: Could not extract {s}s: {}\n", .{ kind.noun(), err });
+        return err;
+    };
+    const content = extracted orelse "";
+    if (content.len == 0) {
+        kind.printHowTo();
+        return;
+    }
+    defer allocator.free(content);
+
+    // On Windows, Zig places DLLs (.pyd) in zig-out/bin/
+    const out_dir = if (builtin.os.tag == .windows) "zig-out/bin" else "zig-out/lib";
+    const script = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ out_dir, kind.scriptName() });
+    defer allocator.free(script);
+
+    cwd.writeFile(io, .{ .sub_path = script, .data = content }) catch |err| {
+        std.debug.print("Error: Could not write {s} file: {s}\n", .{ kind.noun(), @errorName(err) });
         return err;
     };
 
-    if (bench_content == null or bench_content.?.len == 0) {
-        std.debug.print("\nNo benchmarks found in module.\n", .{});
-        std.debug.print("Add .benchmarks to your pyoz.module() config:\n\n", .{});
-        std.debug.print("  .benchmarks = &.{{\n", .{});
-        std.debug.print("      pyoz.bench(\"my benchmark\",\n", .{});
-        std.debug.print("          \\\\mymod.add(100, 200)\n", .{});
-        std.debug.print("      ),\n", .{});
-        std.debug.print("  }},\n", .{});
-        return;
-    }
-    defer allocator.free(bench_content.?);
-
-    // Write benchmark file next to the built module
-    const bench_file = if (builtin.os.tag == .windows) "zig-out/bin/__pyoz_bench.py" else "zig-out/lib/__pyoz_bench.py";
-    {
-        const cwd = std.fs.cwd();
-        const f = cwd.createFile(bench_file, .{}) catch |err| {
-            std.debug.print("Error: Could not write benchmark file: {s}\n", .{@errorName(err)});
-            return err;
-        };
-        defer f.close();
-        f.writeAll(bench_content.?) catch |err| {
-            std.debug.print("Error: Could not write benchmark file: {s}\n", .{@errorName(err)});
-            return err;
-        };
-    }
-
-    // Syntax-check the generated benchmark file before running
     const python_cmd = builder.getPythonCommand();
-    {
-        const syntax_argv = [_][]const u8{ python_cmd, "-m", "py_compile", bench_file };
-        var syntax_check = std.process.Child.init(&syntax_argv, allocator);
-        syntax_check.stderr_behavior = .Inherit;
-        syntax_check.stdout_behavior = .Ignore;
-        const syntax_term = try syntax_check.spawnAndWait();
-        if (syntax_term.Exited != 0) {
-            std.debug.print("\nSyntax error in generated benchmark file.\n", .{});
-            std.debug.print("Check the Python code in your pyoz.bench() definitions.\n", .{});
-            std.process.exit(1);
+    if (!try sys.runInherit(io, &.{ python_cmd, "-m", "py_compile", script }, .{ .stdout = .ignore })) {
+        std.debug.print("\nSyntax error in generated {s} file.\n", .{kind.noun()});
+        switch (kind) {
+            .@"test" => std.debug.print("Check the Python code in your pyoz.@\"test\"() definitions.\n", .{}),
+            .bench => std.debug.print("Check the Python code in your pyoz.bench() definitions.\n", .{}),
+        }
+        std.process.exit(1);
+    }
+
+    std.debug.print("\nRunning {s}s...\n\n", .{kind.noun()});
+
+    // PYTHONPATH = [.:]<out_dir>[:<existing>]; package mode adds the project root
+    const sep = if (builtin.os.tag == .windows) ";" else ":";
+    var pp: std.ArrayList(u8) = .empty;
+    defer pp.deinit(allocator);
+    if (is_package_mode) try pp.appendSlice(allocator, "." ++ sep);
+    try pp.appendSlice(allocator, out_dir);
+    if (ctx.environ.get("PYTHONPATH")) |existing| {
+        if (existing.len > 0) {
+            try pp.appendSlice(allocator, sep);
+            try pp.appendSlice(allocator, existing);
         }
     }
 
-    std.debug.print("\nRunning benchmarks...\n", .{});
-    const path_sep = if (builtin.os.tag == .windows) ";" else ":";
-
-    const existing_pp = std.process.getEnvVarOwned(allocator, "PYTHONPATH") catch "";
-    defer if (existing_pp.len > 0) allocator.free(existing_pp);
-
-    // On Windows, Zig places DLLs (.pyd) in zig-out/bin/, so use the correct directory
-    const bench_out_dir = if (builtin.os.tag == .windows) "zig-out/bin" else "zig-out/lib";
-    // In package mode, also add project root so `import ravn` finds ravn/__init__.py
-    const new_pp = if (is_package_mode)
-        if (existing_pp.len > 0)
-            try std.fmt.allocPrint(allocator, ".{s}{s}{s}{s}", .{ path_sep, bench_out_dir, path_sep, existing_pp })
-        else
-            try std.fmt.allocPrint(allocator, ".{s}{s}", .{ path_sep, bench_out_dir })
-    else if (existing_pp.len > 0)
-        try std.fmt.allocPrint(allocator, "{s}{s}{s}", .{ bench_out_dir, path_sep, existing_pp })
-    else
-        try allocator.dupe(u8, bench_out_dir);
-    defer allocator.free(new_pp);
-
-    var env_map = std.process.getEnvMap(allocator) catch |err| {
-        std.debug.print("Error: Could not get environment: {s}\n", .{@errorName(err)});
-        return err;
-    };
+    var env_map = try ctx.environ.clone(allocator);
     defer env_map.deinit();
-    try env_map.put("PYTHONPATH", new_pp);
+    try env_map.put("PYTHONPATH", pp.items);
 
-    const argv = [_][]const u8{ python_cmd, bench_file };
-    var child = std.process.Child.init(&argv, allocator);
-    child.env_map = &env_map;
-    child.stderr_behavior = .Inherit;
-    child.stdout_behavior = .Inherit;
-
-    const term = try child.spawnAndWait();
-    if (term.Exited != 0) {
-        std.process.exit(1);
-    }
+    const ok = switch (kind) {
+        .@"test" => blk: {
+            const base = [_][]const u8{ python_cmd, "-m", "unittest", script, "-v" };
+            const argv: []const []const u8 = if (verbose) &base else base[0..4];
+            break :blk try sys.runInherit(io, argv, .{ .environ_map = &env_map });
+        },
+        .bench => try sys.runInherit(io, &.{ python_cmd, script }, .{ .environ_map = &env_map }),
+    };
+    if (!ok) std.process.exit(1);
 }

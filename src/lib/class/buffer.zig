@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const py = @import("../python.zig");
+const ft = @import("threading.zig");
 
 const abi3_enabled = py.types.abi3_enabled;
 
@@ -47,8 +48,8 @@ pub fn BufferProtocol(comptime T: type, comptime Parent: type) type {
                 unreachable;
             }
             var bp: py.PyBufferProcs = std.mem.zeroes(py.PyBufferProcs);
-            bp.bf_getbuffer = @ptrCast(&py_bf_getbuffer);
-            bp.bf_releasebuffer = @ptrCast(&py_bf_releasebuffer);
+            bp.bf_getbuffer = @ptrCast(ft.locked(T, py_bf_getbuffer));
+            bp.bf_releasebuffer = @ptrCast(ft.locked(T, py_bf_releasebuffer));
             return bp;
         }
 

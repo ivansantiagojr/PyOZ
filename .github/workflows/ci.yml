@@ -25,7 +25,7 @@ jobs:
             - name: Setup Zig
               uses: goto-bus-stop/setup-zig@v2
               with:
-                  version: 0.15.2
+                  version: 0.16.0
 
             - name: Check format
               run: zig fmt --check src/ build.zig examples/
@@ -36,7 +36,9 @@ jobs:
         strategy:
             fail-fast: false
             matrix:
-                python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+                # 3.14t: free-threaded build (PEP 703); the example module
+                # declares .gil_used = false, so the suite runs without the GIL
+                python-version: ["3.10", "3.11", "3.12", "3.13", "3.14", "3.14t"]
 
         steps:
             - name: Checkout
@@ -45,7 +47,7 @@ jobs:
             - name: Setup Zig
               uses: goto-bus-stop/setup-zig@v2
               with:
-                  version: 0.15.2
+                  version: 0.16.0
 
             - name: Setup Python
               uses: actions/setup-python@v5
@@ -68,13 +70,19 @@ jobs:
             - name: Run tests
               run: zig build test
 
+            # Optimized builds expose undefined behavior that happens to work in
+            # Debug (e.g. returning slices of dead stack frames). On 3.14t this
+            # also runs the free-threading stress tests with optimizations.
+            - name: Run tests (ReleaseSafe)
+              run: zig build test -Doptimize=ReleaseSafe
+
     test-abi3:
         name: Test ABI3 (Python ${{ matrix.python-version }})
         runs-on: ubuntu-latest
         strategy:
             fail-fast: false
             matrix:
-                python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+                python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
 
         steps:
             - name: Checkout
@@ -83,7 +91,7 @@ jobs:
             - name: Setup Zig
               uses: goto-bus-stop/setup-zig@v2
               with:
-                  version: 0.15.2
+                  version: 0.16.0
 
             - name: Setup Python
               uses: actions/setup-python@v5
@@ -106,6 +114,14 @@ jobs:
             - name: Run ABI3 tests
               run: zig build test_abi3
 
+            # The default run compiles without Py_LIMITED_API; this one builds
+            # the example against the real Stable ABI headers.
+            - name: Run ABI3 tests (Limited API)
+              run: zig build test_abi3 -Dabi3=true
+
+            - name: Run ABI3 tests (Limited API, ReleaseSafe)
+              run: zig build test_abi3 -Dabi3=true -Doptimize=ReleaseSafe
+
     build:
         name: Build Library & CLI
         runs-on: ubuntu-latest
@@ -117,7 +133,7 @@ jobs:
             - name: Setup Zig
               uses: goto-bus-stop/setup-zig@v2
               with:
-                  version: 0.15.2
+                  version: 0.16.0
 
             - name: Setup Python
               uses: actions/setup-python@v5
@@ -140,14 +156,61 @@ jobs:
             - name: Build CLI
               run: zig build cli
 
-    example-module:
-        name: Example Module (${{ matrix.os }}, Python ${{ matrix.python-version }})
+            - name: Run CLI unit tests
+              run: zig build test_cli
+
+            - name: Cross-compile CLI for all platforms
+              run: zig build release
+
+            # The pip-installable backend builds PyOZ in ABI3 mode and embeds
+            # the CLI, so it catches regressions neither suite above sees.
+            - name: Build pypi backend
+              working-directory: pypi
+              run: zig build
+
+            # End-to-end packaging: the pyoz wheel as a PEP 517/660 build
+            # backend for a freshly generated project (regular + editable).
+            - name: pip install . and pip install -e . via pyoz.backend
+              run: |
+                  zig build cli
+                  (cd pypi && python build_wheels.py --current-only)
+                  python -m venv /tmp/venv
+                  /tmp/venv/bin/pip install pypi/dist/*.whl
+                  mkdir -p /tmp/proj && cd /tmp/proj
+                  "$GITHUB_WORKSPACE/zig-out/bin/pyoz" init --local "$GITHUB_WORKSPACE" demo
+                  cp -r demo demo_editable
+                  (cd demo && /tmp/venv/bin/pip install --no-build-isolation .)
+                  (cd / && /tmp/venv/bin/python -c "import demo; assert demo.add(2, 3) == 5")
+                  /tmp/venv/bin/pip uninstall -y demo
+                  (cd demo_editable && /tmp/venv/bin/pip install --no-build-isolation -e .)
+                  (cd / && /tmp/venv/bin/python -c "import demo; assert demo.add(2, 3) == 5")
+                  /tmp/venv/bin/pip show demo | grep "Editable project location"
+
+            # Issue #60: a source install in pip's isolated build environment
+            # with no Zig on PATH gets the compiler from the `ziglang` package.
+            - name: pip install . with build isolation and no system Zig
+              run: |
+                  /tmp/venv/bin/pip uninstall -y demo
+                  cd /tmp/proj
+                  "$GITHUB_WORKSPACE/zig-out/bin/pyoz" init --local "$GITHUB_WORKSPACE" isolated
+                  NOZIG_PATH=$(echo "$PATH" | tr ':' '\n' | grep -vi zig | paste -sd: -)
+                  if PATH="$NOZIG_PATH" command -v zig; then echo "zig still on PATH"; exit 1; fi
+                  (cd isolated && PATH="$NOZIG_PATH" PIP_FIND_LINKS="$GITHUB_WORKSPACE/pypi/dist" /tmp/venv/bin/pip install .)
+                  (cd / && /tmp/venv/bin/python -c "import isolated; assert isolated.add(2, 3) == 5")
+
+    # `pyoz build` on each OS: a generated project builds a portable wheel whose
+    # platform tag is read from the binary, and the wheel installs and imports.
+    # Linux also cross-builds every target from one machine.
+    wheels:
+        name: Wheels (${{ matrix.os }})
         runs-on: ${{ matrix.os }}
         strategy:
             fail-fast: false
             matrix:
                 os: [ubuntu-latest, windows-latest, macos-latest]
-                python-version: ["3.10", "3.11", "3.12", "3.13"]
+        defaults:
+            run:
+                shell: bash
 
         steps:
             - name: Checkout
@@ -156,7 +219,57 @@ jobs:
             - name: Setup Zig
               uses: goto-bus-stop/setup-zig@v2
               with:
-                  version: 0.15.2
+                  version: 0.16.0
+
+            - name: Setup Python
+              uses: actions/setup-python@v5
+              with:
+                  python-version: "3.12"
+
+            - name: Build CLI
+              run: zig build cli
+
+            - name: pyoz build --release, install, import
+              run: |
+                  PYOZ="$PWD/zig-out/bin/pyoz"
+                  mkdir -p ../wheel-proj && cd ../wheel-proj
+                  "$PYOZ" init --local "$GITHUB_WORKSPACE" demo
+                  cd demo
+                  "$PYOZ" build --release
+                  ls dist
+                  case "$(ls dist)" in
+                      *linux_*) echo "Linux wheel is not portable"; exit 1 ;;
+                  esac
+                  python -m pip install dist/*.whl
+                  (cd / && python -c "import demo; assert demo.add(2, 3) == 5; print('ok')")
+
+            - name: Cross-build every target
+              if: runner.os == 'Linux'
+              run: |
+                  cd ../wheel-proj/demo && rm -rf dist
+                  "$GITHUB_WORKSPACE/zig-out/bin/pyoz" build --release --target all --python 3.13
+                  ls dist
+                  for tag in manylinux_2_17_x86_64 manylinux_2_17_aarch64 macosx_13_0_x86_64 macosx_13_0_arm64 win_amd64 win_arm64; do
+                      ls dist/*-cp313-cp313-$tag.whl
+                  done
+
+    example-module:
+        name: Example Module (${{ matrix.os }}, Python ${{ matrix.python-version }})
+        runs-on: ${{ matrix.os }}
+        strategy:
+            fail-fast: false
+            matrix:
+                os: [ubuntu-latest, windows-latest, macos-latest]
+                python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+
+            - name: Setup Zig
+              uses: goto-bus-stop/setup-zig@v2
+              with:
+                  version: 0.16.0
 
             - name: Setup Python
               uses: actions/setup-python@v5

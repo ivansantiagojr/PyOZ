@@ -505,8 +505,6 @@ test "fn bytes_starts_with - check prefix" {
 // ============================================================================
 
 test "fn path_len - get path length" {
-    // Skip on Python 3.9 due to CI-specific segfault (works locally but not in GitHub Actions)
-    try skipPythonVersion(3, 9);
     const python = try initTestPython();
 
     try python.exec("from pathlib import Path");
@@ -515,8 +513,6 @@ test "fn path_len - get path length" {
 }
 
 test "fn make_path - create path" {
-    // Skip on Python 3.9 due to CI-specific segfault (works locally but not in GitHub Actions)
-    try skipPythonVersion(3, 9);
     const python = try initTestPython();
 
     try python.exec("from pathlib import Path");
@@ -526,8 +522,6 @@ test "fn make_path - create path" {
 }
 
 test "fn path_str - get path string" {
-    // Skip on Python 3.9 due to CI-specific segfault (works locally but not in GitHub Actions)
-    try skipPythonVersion(3, 9);
     const python = try initTestPython();
 
     try python.exec("from pathlib import Path");
@@ -536,8 +530,6 @@ test "fn path_str - get path string" {
 }
 
 test "fn path_starts_with - check prefix" {
-    // Skip on Python 3.9 due to CI-specific segfault (works locally but not in GitHub Actions)
-    try skipPythonVersion(3, 9);
     const python = try initTestPython();
 
     try python.exec("from pathlib import Path");
@@ -675,6 +667,27 @@ test "fn sum_triple - accept fixed array" {
 
     const sum = try python.eval(i64, "example.sum_triple([10, 20, 30])");
     try std.testing.expectEqual(@as(i64, 60), sum);
+}
+
+test "fixed arrays - accept tuples, clear errors, list|tuple stubs (#61)" {
+    const python = try initTestPython();
+    try std.testing.expectEqual(@as(i64, 60), try python.eval(i64, "example.sum_triple((10, 20, 30))"));
+    try python.exec(
+        \\def _pyoz_err(f):
+        \\    try:
+        \\        f(); return "no error"
+        \\    except Exception as e:
+        \\        return f"{type(e).__name__}: {e}"
+        \\_pyoz_len = _pyoz_err(lambda: example.sum_triple((1, 2)))
+        \\_pyoz_kind = _pyoz_err(lambda: example.sum_triple("abc"))
+    );
+    try std.testing.expectEqualStrings("ValueError: expected 3 items, got 2", try python.eval([]const u8, "_pyoz_len"));
+    try std.testing.expectEqualStrings("TypeError: expected a list or tuple of 3 items", try python.eval([]const u8, "_pyoz_kind"));
+
+    const stubs_opt = symreader.extractStubs(std.testing.io, std.testing.allocator, "zig-out/lib/example.so") catch null;
+    const stubs = stubs_opt orelse return error.SkipZigTest;
+    defer std.testing.allocator.free(stubs);
+    try std.testing.expect(std.mem.indexOf(u8, stubs, "def sum_triple(arg0: list[int] | tuple[int, ...]) -> int") != null);
 }
 
 test "fn dot_product_3d - compute dot product" {
@@ -1830,7 +1843,7 @@ test "fn validate_positive_sig - Signature runtime behavior" {
 
 test "Signature - stub shows overridden type, not inferred type" {
     // Extract stubs from the compiled example.so using symreader
-    const stubs_opt = symreader.extractStubs(std.testing.allocator, "zig-out/lib/example.so") catch null;
+    const stubs_opt = symreader.extractStubs(std.testing.io, std.testing.allocator, "zig-out/lib/example.so") catch null;
     const stubs = stubs_opt orelse return error.SkipZigTest;
     defer std.testing.allocator.free(stubs);
 
@@ -3303,7 +3316,11 @@ test "Freelist - memory reuse" {
         \\id2 = id(p2)
         \\reused = (id1 == id2)
     );
-    try std.testing.expect(try python.eval(bool, "reused"));
+    // Freelists are disabled on free-threaded CPython (see class/lifecycle.zig);
+    // there the allocator decides reuse, so only check it on GIL builds.
+    if (!pyoz.py.types.gil_disabled) {
+        try std.testing.expect(try python.eval(bool, "reused"));
+    }
     // Verify fresh values, not stale
     try std.testing.expectEqual(@as(f64, 3.0), try python.eval(f64, "p2.x"));
     try std.testing.expectEqual(@as(f64, 4.0), try python.eval(f64, "p2.y"));
@@ -3337,12 +3354,7 @@ test "__class_getitem__ - basic subscript" {
     );
     const alias_name = try python.eval([]const u8, "alias_name");
 
-    // On Python 3.9+ we get a GenericAlias, on 3.8 we get the class itself
-    if (python_version.minor >= 9) {
-        try std.testing.expectEqualStrings("example.SimplePoint[int]", alias_name);
-    } else {
-        try std.testing.expectEqualStrings("<class 'example.SimplePoint'>", alias_name);
-    }
+    try std.testing.expectEqualStrings("example.SimplePoint[int]", alias_name);
 }
 
 test "__class_getitem__ - multiple type params" {
@@ -3567,6 +3579,24 @@ test "fmt - formatted raise with dynamic values" {
     try std.testing.expectEqual(@as(i64, 5), try python.eval(i64, "example.test_fmt_raise(5, 10)"));
 }
 
+test "pyoz.fmt - long messages are not truncated" {
+    const python = try initTestPython();
+    try python.exec(
+        \\try:
+        \\    example.test_fmt_long(7)
+        \\    ok = False
+        \\except ValueError as e:
+        \\    m = str(e)
+        \\    ok = len(m) == 5002 and m.startswith("xxx") and m.endswith("|7")
+    );
+    try std.testing.expect(try python.eval(bool, "ok"));
+}
+
+test "pyoz.fmt - usable as a function return type" {
+    const python = try initTestPython();
+    try std.testing.expect(try python.eval(bool, "example.test_fmt_return(2, 3) == '2+3=5'"));
+}
+
 test "fmt - formatted raise produces correct error message" {
     const python = try initTestPython();
 
@@ -3645,7 +3675,7 @@ const expected_stub_content = "# Test stub content\ndef hello(): ...\n";
 
 test "symreader - extract stubs from ELF binary" {
     const elf_path = test_config.elf_test_lib;
-    const result = symreader.extractStubs(std.testing.allocator, elf_path) catch |err| {
+    const result = symreader.extractStubs(std.testing.io, std.testing.allocator, elf_path) catch |err| {
         std.debug.print("ELF extraction error: {}\n", .{err});
         return err;
     };
@@ -3659,7 +3689,7 @@ test "symreader - extract stubs from ELF binary" {
 
 test "symreader - extract stubs from PE binary" {
     const pe_path = test_config.pe_test_lib;
-    const result = symreader.extractStubs(std.testing.allocator, pe_path) catch |err| {
+    const result = symreader.extractStubs(std.testing.io, std.testing.allocator, pe_path) catch |err| {
         std.debug.print("PE extraction error: {}\n", .{err});
         return err;
     };
@@ -3768,7 +3798,7 @@ test "ArenaClass - repr" {
 
 test "symreader - extract stubs from Mach-O binary" {
     const macho_path = test_config.macho_test_lib;
-    const result = symreader.extractStubs(std.testing.allocator, macho_path) catch |err| {
+    const result = symreader.extractStubs(std.testing.io, std.testing.allocator, macho_path) catch |err| {
         std.debug.print("Mach-O extraction error: {}\n", .{err});
         return err;
     };
@@ -3778,4 +3808,378 @@ test "symreader - extract stubs from Mach-O binary" {
     } else {
         return error.StubsNotFound;
     }
+}
+
+test "asyncFn - results, errors, arena strings, concurrency, cancellation, no leaks" {
+    const python = try initTestPython();
+    try python.exec(
+        \\import asyncio, time, gc
+        \\async def _pyoz_async_checks():
+        \\    assert await example.async_sleep_add(1, 2, 3) == 5
+        \\    assert await example.async_greet("zig") == "hello, zig!"
+        \\    try:
+        \\        await example.async_fail(0); return "no error"
+        \\    except ValueError:
+        \\        pass
+        \\    t0 = time.perf_counter()
+        \\    r = await asyncio.gather(*(example.async_sleep_add(50, i, 0) for i in range(20)))
+        \\    if r != list(range(20)): return "gather results"
+        \\    if time.perf_counter() - t0 > 0.9: return "not concurrent"
+        \\    t = asyncio.ensure_future(example.async_sleep_add(10_000, 0, 0))
+        \\    await asyncio.sleep(0.01); t.cancel()
+        \\    try:
+        \\        await t; return "not cancelled"
+        \\    except asyncio.CancelledError:
+        \\        pass
+        \\    for _ in range(400):
+        \\        gc.collect()
+        \\        if example.async_live_jobs() == 0: return "ok"
+        \\        await asyncio.sleep(0.005)
+        \\    return "leaked %d jobs" % example.async_live_jobs()
+        \\_pyoz_async_result = asyncio.run(_pyoz_async_checks())
+    );
+    const result = try python.eval([]const u8, "_pyoz_async_result");
+    try std.testing.expectEqualStrings("ok", result);
+}
+
+test "asyncFn - class instances, copied arguments, error mappings, 8 params" {
+    const python = try initTestPython();
+    try python.exec(
+        \\import asyncio
+        \\async def _pyoz_async2():
+        \\    p = await example.async_scale_point(example.Point(1.5, -2.0), 2.0)
+        \\    if type(p) is not example.Point or (p.x, p.y) != (3.0, -4.0): return "class result"
+        \\    src = example.Point(1.0, 1.0); fut = example.async_scale_point(src, 10.0); src.x = 999.0
+        \\    if (await fut).x != 10.0: return "argument not copied"
+        \\    if await example.async_checked(21) != 42: return "value"
+        \\    for n, msg in ((-1, "NegativeValue"), (5000, "Value exceeds maximum of 1000")):
+        \\        try:
+        \\            await example.async_checked(n); return "no error"
+        \\        except ValueError as e:
+        \\            if str(e) != msg: return "mapping: " + str(e)
+        \\    if await example.async_sum8(1, 2, 3, 4, 5, 6, 7, 8) != 36: return "sum8"
+        \\    try:
+        \\        example.async_scale_point("nope", 1.0); return "no TypeError"
+        \\    except TypeError:
+        \\        pass
+        \\    return "ok"
+        \\_pyoz_async2_result = asyncio.run(_pyoz_async2())
+    );
+    try std.testing.expectEqualStrings("ok", try python.eval([]const u8, "_pyoz_async2_result"));
+}
+
+test "asyncMethod - borrowed self kept alive and released; copies are isolated" {
+    const python = try initTestPython();
+    try python.exec(
+        \\import asyncio, gc, sys
+        \\async def _pyoz_am():
+        \\    v = example.FrozenVec(3.0, 4.0)
+        \\    if await v.slow_norm(1) != 5.0: return "borrow result"
+        \\    fut = example.FrozenVec(6.0, 8.0).slow_norm(50); gc.collect()
+        \\    if await fut != 10.0: return "keepalive"
+        \\    base = sys.getrefcount(v)
+        \\    t = asyncio.ensure_future(v.slow_norm(10_000)); await asyncio.sleep(0.01); t.cancel()
+        \\    try:
+        \\        await t
+        \\    except asyncio.CancelledError:
+        \\        pass
+        \\    for _ in range(400):
+        \\        gc.collect()
+        \\        if example.async_live_jobs() == 0 and sys.getrefcount(v) == base: break
+        \\        await asyncio.sleep(0.005)
+        \\    else:
+        \\        return "not released after cancel"
+        \\    c = example.AsyncCounter(5)
+        \\    fut = c.value_later(20); c.inc()
+        \\    if await fut != 5 or c.value != 6: return "copy at call time"
+        \\    if await c.bumped_copy(100) != 106 or c.value != 6: return "copy isolation"
+        \\    return "ok"
+        \\_pyoz_am_result = asyncio.run(_pyoz_am())
+    );
+    try std.testing.expectEqualStrings("ok", try python.eval([]const u8, "_pyoz_am_result"));
+}
+
+// ============================================================================
+// ASYNC PROTOCOLS (__aiter__, __anext__, __await__, __aenter__, __aexit__)
+// ============================================================================
+
+test "async protocols - __aiter__/__anext__ with immediate values, anext() default" {
+    const python = try initTestPython();
+    try python.exec(
+        \\import asyncio
+        \\async def _pyoz_aiter():
+        \\    c = example.Countdown(3)
+        \\    if c.__aiter__() is not c: return "__aiter__ must return self"
+        \\    if [x async for x in c] != [3, 2, 1]: return "values"
+        \\    if [x async for x in c] != []: return "exhausted iterator must stay exhausted"
+        \\    c = example.Countdown(1)
+        \\    if await anext(c) != 1: return "anext"
+        \\    if await anext(c, "done") != "done": return "anext default"
+        \\    try:
+        \\        await anext(c); return "no StopAsyncIteration"
+        \\    except StopAsyncIteration:
+        \\        pass
+        \\    return "ok"
+        \\_pyoz_aiter_result = asyncio.run(_pyoz_aiter())
+    );
+    try std.testing.expectEqualStrings("ok", try python.eval([]const u8, "_pyoz_aiter_result"));
+}
+
+test "async protocols - __anext__ backed by std.Io tasks, null result stops, no leaks" {
+    const python = try initTestPython();
+    try python.exec(
+        \\import asyncio, gc
+        \\async def _pyoz_pages():
+        \\    p = example.AsyncPages(4, 1)
+        \\    if [x async for x in p] != [0, 10, 20, 30]: return "values"   # ended by the task
+        \\    if await anext(p, "past end") != "past end": return "direct null"  # no task started
+        \\    if await anext(example.AsyncPages(0, 1), "empty") != "empty": return "anext default"
+        \\    # a slow in-flight __anext__ task is cancelled by the timeout
+        \\    try:
+        \\        await asyncio.wait_for(anext(example.AsyncPages(5, 10_000)), 0.02); return "no timeout"
+        \\    except asyncio.TimeoutError:
+        \\        pass
+        \\    for _ in range(400):
+        \\        gc.collect()
+        \\        if example.async_live_jobs() == 0: return "ok"
+        \\        await asyncio.sleep(0.005)
+        \\    return "leaked %d jobs" % example.async_live_jobs()
+        \\_pyoz_pages_result = asyncio.run(_pyoz_pages())
+    );
+    try std.testing.expectEqualStrings("ok", try python.eval([]const u8, "_pyoz_pages_result"));
+}
+
+test "async protocols - __await__ from a task and immediate, generator-style driving" {
+    const python = try initTestPython();
+    try python.exec(
+        \\import asyncio
+        \\async def _pyoz_await():
+        \\    if await example.Delayed(7, 5) != 7: return "task __await__"
+        \\    if await example.Immediate(21) != 42: return "immediate __await__"
+        \\    r = await asyncio.gather(*(example.Delayed(i, 20) for i in range(10)))
+        \\    if r != list(range(10)): return "gather"
+        \\    return "ok"
+        \\_pyoz_await_result = asyncio.run(_pyoz_await())
+        \\it = example.Immediate(5).__await__()
+        \\try:
+        \\    it.send(None); _pyoz_send = "no StopIteration"
+        \\except StopIteration as s:
+        \\    _pyoz_send = s.value
+        \\it = example.Immediate(5).__await__()
+        \\try:
+        \\    it.throw(KeyError("k")); _pyoz_throw = "no raise"
+        \\except KeyError:
+        \\    _pyoz_throw = "ok"
+        \\it = example.Immediate(5).__await__(); it.close()
+        \\try:
+        \\    next(it); _pyoz_close = "value after close"
+        \\except StopIteration as s:
+        \\    _pyoz_close = "ok" if s.value is None else "value after close"
+    );
+    try std.testing.expectEqualStrings("ok", try python.eval([]const u8, "_pyoz_await_result"));
+    try std.testing.expectEqual(@as(i64, 10), try python.eval(i64, "_pyoz_send"));
+    try std.testing.expectEqualStrings("ok", try python.eval([]const u8, "_pyoz_throw"));
+    try std.testing.expectEqualStrings("ok", try python.eval([]const u8, "_pyoz_close"));
+}
+
+test "async protocols - immediate awaitables need no event loop" {
+    const python = try initTestPython();
+    try python.exec(
+        \\async def _pyoz_noloop():
+        \\    items = [x async for x in example.Countdown(3)]
+        \\    r = example.AsyncResource(0, 0, False)
+        \\    async with r as same:
+        \\        pass
+        \\    return items + [await example.Immediate(4), same is r]
+        \\coro = _pyoz_noloop()
+        \\try:
+        \\    coro.send(None); _pyoz_noloop_result = "suspended"
+        \\except StopIteration as s:
+        \\    _pyoz_noloop_result = repr(s.value)
+    );
+    try std.testing.expectEqualStrings("[3, 2, 1, 8, True]", try python.eval([]const u8, "_pyoz_noloop_result"));
+}
+
+test "async protocols - __aenter__/__aexit__ return self, see errors, do not suppress" {
+    const python = try initTestPython();
+    try python.exec(
+        \\import asyncio
+        \\async def _pyoz_actx():
+        \\    r = example.AsyncResource(0, 0, False)
+        \\    async with r as got:
+        \\        if got is not r: return "__aenter__ must return self"
+        \\        if (r.entered, r.exited) != (1, 0): return "enter count"
+        \\    if (r.exited, r.saw_error) != (1, False): return "clean exit"
+        \\    try:
+        \\        async with r:
+        \\            raise KeyError("boom")
+        \\        return "exception suppressed"
+        \\    except KeyError:
+        \\        pass
+        \\    if (r.entered, r.exited, r.saw_error) != (2, 2, True): return "error exit"
+        \\    return "ok"
+        \\_pyoz_actx_result = asyncio.run(_pyoz_actx())
+    );
+    try std.testing.expectEqualStrings("ok", try python.eval([]const u8, "_pyoz_actx_result"));
+}
+
+test "async protocols - dunders are slots, not plain methods, and stubs are async" {
+    const python = try initTestPython();
+    try std.testing.expect(try python.eval(bool, "type(example.Countdown.__dict__['__anext__']).__name__ == 'wrapper_descriptor'"));
+    try std.testing.expect(try python.eval(bool, "type(example.Delayed.__dict__['__await__']).__name__ == 'wrapper_descriptor'"));
+
+    const stubs_opt = symreader.extractStubs(std.testing.io, std.testing.allocator, "zig-out/lib/example.so") catch null;
+    const stubs = stubs_opt orelse return error.SkipZigTest;
+    defer std.testing.allocator.free(stubs);
+    for ([_][]const u8{
+        "from typing import Any, Awaitable, Generator,",
+        "    def __aiter__(self) -> Countdown: ...",
+        "    async def __anext__(self) -> int: ...",
+        "    def __await__(self) -> Generator[Any, Any, int]: ...",
+        "    async def __aenter__(self) -> AsyncResource: ...",
+        "    async def __aexit__(self, exc_type: type[BaseException] | None, exc_val: BaseException | None, exc_tb: Any) -> bool: ...",
+    }) |needle| {
+        if (std.mem.indexOf(u8, stubs, needle) == null) {
+            std.debug.print("missing stub line: {s}\n", .{needle});
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
+// ============================================================================
+// FREE-THREADING STRESS (real parallelism; runs only on free-threaded CPython)
+// ============================================================================
+// CI runs this on multi-core runners for 3.14t, in Debug and ReleaseSafe.
+
+fn requireFreeThreaded(python: *pyoz.Python) !void {
+    if (!pyoz.py.types.gil_disabled) return error.SkipZigTest;
+    try python.exec("import sys");
+    if (try python.eval(bool, "sys._is_gil_enabled()")) {
+        std.debug.print("free-threaded build but the GIL is enabled (is .gil_used = false set?)\n", .{});
+        return error.TestUnexpectedResult;
+    }
+}
+
+test "free-threading stress - shared objects under real parallel contention" {
+    const python = try initTestPython();
+    try requireFreeThreaded(python);
+    try python.exec(
+        \\import threading, os
+        \\T = max(8, 2 * (os.cpu_count() or 1))
+        \\N = 4000
+        \\bag = example.Bag(0)
+        \\tally = example.Tally(0, 0)
+        \\barrier = threading.Barrier(T)
+        \\def _work(tid):
+        \\    barrier.wait()
+        \\    base = tid * N
+        \\    for i in range(N):
+        \\        bag.push(base + i)        # ArrayList append: reallocation races
+        \\        if i % 8 == 0:
+        \\            tally.add(1)          # read-modify-write across a yield
+        \\        bag.size()                # concurrent readers
+        \\threads = [threading.Thread(target=_work, args=(t,)) for t in range(T)]
+        \\[t.start() for t in threads]; [t.join() for t in threads]
+        \\expected_items = T * N
+        \\_ft_ok = (bag.size() == expected_items
+        \\          and bag.total() == sum(range(expected_items))
+        \\          and tally.total == tally.calls == T * ((N + 7) // 8)
+        \\          and not sys._is_gil_enabled())
+        \\_ft_detail = f"T={T} size={bag.size()}/{expected_items} tally={tally.total}/{tally.calls}"
+    );
+    const ok = try python.eval(bool, "_ft_ok");
+    if (!ok) std.debug.print("{s}\n", .{try python.eval([]const u8, "_ft_detail")});
+    try std.testing.expect(ok);
+}
+
+test "free-threading stress - protocol slots (tp_iternext) take the object lock" {
+    const python = try initTestPython();
+    try requireFreeThreaded(python);
+    try python.exec(
+        \\import threading, os
+        \\T = max(8, 2 * (os.cpu_count() or 1))
+        \\N = 20000
+        \\cur = example.SharedCursor(N)
+        \\seen = [[] for _ in range(T)]
+        \\barrier = threading.Barrier(T)
+        \\def _work(tid):
+        \\    barrier.wait()
+        \\    seen[tid].extend(cur)   # next(cur) from every thread at once
+        \\threads = [threading.Thread(target=_work, args=(t,)) for t in range(T)]
+        \\[t.start() for t in threads]; [t.join() for t in threads]
+        \\allv = sorted(v for s in seen for v in s)
+        \\_ft_slot_ok = allv == list(range(1, N + 1)) and not sys._is_gil_enabled()
+        \\_ft_slot_detail = f"T={T} got={len(allv)}/{N} unique={len(set(allv))}"
+    );
+    const ok = try python.eval(bool, "_ft_slot_ok");
+    if (!ok) std.debug.print("{s}\n", .{try python.eval([]const u8, "_ft_slot_detail")});
+    try std.testing.expect(ok);
+}
+
+test "free-threading stress - one async iterator drained by parallel event loops" {
+    const python = try initTestPython();
+    try requireFreeThreaded(python);
+    try python.exec(
+        \\import threading, asyncio, os
+        \\T = max(8, 2 * (os.cpu_count() or 1))
+        \\N = 20000
+        \\shared = example.Countdown(N)
+        \\seen = [[] for _ in range(T)]
+        \\barrier = threading.Barrier(T)
+        \\async def _drain(out):
+        \\    async for x in shared:   # __anext__ mutates self: must run under the object lock
+        \\        out.append(x)
+        \\def _work(tid):
+        \\    barrier.wait()
+        \\    asyncio.run(_drain(seen[tid]))
+        \\threads = [threading.Thread(target=_work, args=(t,)) for t in range(T)]
+        \\[t.start() for t in threads]; [t.join() for t in threads]
+        \\allv = sorted(v for s in seen for v in s)
+        \\_ft_aiter_ok = allv == list(range(1, N + 1)) and not sys._is_gil_enabled()
+        \\_ft_aiter_detail = f"T={T} got={len(allv)}/{N} unique={len(set(allv))}"
+    );
+    const ok = try python.eval(bool, "_ft_aiter_ok");
+    if (!ok) std.debug.print("{s}\n", .{try python.eval([]const u8, "_ft_aiter_detail")});
+    try std.testing.expect(ok);
+}
+
+test "free-threading stress - async from parallel event loops" {
+    const python = try initTestPython();
+    try requireFreeThreaded(python);
+    try python.exec(
+        \\import asyncio, threading, gc, time
+        \\_ft_errors = []
+        \\async def _loop_worker(tid):
+        \\    tasks = []
+        \\    for i in range(1500):
+        \\        k = i % 3
+        \\        if k == 0: tasks.append(asyncio.ensure_future(example.async_sum(i)))
+        \\        elif k == 1: tasks.append(asyncio.ensure_future(example.async_greet(f"t{tid}-{i}")))
+        \\        else: tasks.append(asyncio.ensure_future(example.async_sleep_add(2, tid, i)))
+        \\    for t in tasks[::7]: t.cancel()
+        \\    res = await asyncio.gather(*tasks, return_exceptions=True)
+        \\    for i, r in enumerate(res):
+        \\        if isinstance(r, asyncio.CancelledError): continue
+        \\        k = i % 3
+        \\        exp = sum(range(i)) if k == 0 else (f"hello, t{tid}-{i}!" if k == 1 else tid + i)
+        \\        if r != exp: _ft_errors.append((tid, i, r, exp))
+        \\ts = [threading.Thread(target=lambda t=t: asyncio.run(_loop_worker(t))) for t in range(6)]
+        \\[t.start() for t in ts]; [t.join() for t in ts]
+        \\for _ in range(400):
+        \\    gc.collect()
+        \\    if example.async_live_jobs() == 0: break
+        \\    time.sleep(0.005)
+        \\_ft_async_ok = not _ft_errors and example.async_live_jobs() == 0 and not sys._is_gil_enabled()
+        \\_ft_async_detail = f"errors={_ft_errors[:3]} live={example.async_live_jobs()}"
+    );
+    const ok = try python.eval(bool, "_ft_async_ok");
+    if (!ok) std.debug.print("{s}\n", .{try python.eval([]const u8, "_ft_async_detail")});
+    try std.testing.expect(ok);
+}
+
+test "decimal_double - returns an owned Decimal (no dangling buffer)" {
+    const python = try initTestPython();
+    try python.exec("from decimal import Decimal");
+    try std.testing.expect(try python.eval(bool, "example.decimal_double(Decimal('1.5')) == Decimal('3')"));
+    try std.testing.expect(try python.eval(bool, "isinstance(example.decimal_double(Decimal('2.25')), Decimal)"));
 }

@@ -54,6 +54,8 @@ print(p.x, p.y)       # 3.0 4.0
 - **Error handling** -- Zig errors become Python exceptions; custom exception types supported
 - **Type stubs** -- Automatic `.pyi` generation for IDE autocomplete and type checking
 - **GIL management** -- Release the GIL for CPU-bound Zig code with `pyoz.releaseGIL()`
+- **Async** -- `await` Zig functions and methods from asyncio (built on Zig's `std.Io`), with cancellation that reaches the Zig task
+- **Free-threading** -- Runs without the GIL on free-threaded CPython (3.14t); class instances get per-object locking automatically
 - **Cross-class references** -- Methods can accept/return instances of other classes in the same module
 - **Simple tooling** -- `pyoz init`, `pyoz build`, `pyoz develop`, `pyoz publish`
 
@@ -63,7 +65,7 @@ print(p.x, p.y)       # 3.0 4.0
 pip install pyoz
 ```
 
-Requires **Zig 0.15.0+** and **Python 3.8--3.13**.
+Requires **Zig 0.16.0+** and **Python 3.10--3.14**.
 
 ## Getting Started
 

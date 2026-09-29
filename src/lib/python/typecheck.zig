@@ -40,19 +40,19 @@ inline fn isTypeOrSubtype(obj: *PyObject, type_ptr: *PyTypeObject) bool {
 }
 
 pub inline fn PyLong_Check(obj: *PyObject) bool {
-    return isTypeOrSubtype(obj, @ptrCast(&c.PyLong_Type));
+    return isTypeOrSubtype(obj, types.typeObject("PyLong_Type"));
 }
 
 pub inline fn PyFloat_Check(obj: *PyObject) bool {
-    return isTypeOrSubtype(obj, @ptrCast(&c.PyFloat_Type));
+    return isTypeOrSubtype(obj, types.typeObject("PyFloat_Type"));
 }
 
 pub inline fn PyUnicode_Check(obj: *PyObject) bool {
-    return isTypeOrSubtype(obj, @ptrCast(&c.PyUnicode_Type));
+    return isTypeOrSubtype(obj, types.typeObject("PyUnicode_Type"));
 }
 
 pub inline fn PyBool_Check(obj: *PyObject) bool {
-    return isTypeOrSubtype(obj, @ptrCast(&c.PyBool_Type));
+    return isTypeOrSubtype(obj, types.typeObject("PyBool_Type"));
 }
 
 pub inline fn PyNone_Check(obj: *PyObject) bool {
@@ -60,15 +60,15 @@ pub inline fn PyNone_Check(obj: *PyObject) bool {
 }
 
 pub inline fn PyTuple_Check(obj: *PyObject) bool {
-    return isTypeOrSubtype(obj, @ptrCast(&c.PyTuple_Type));
+    return isTypeOrSubtype(obj, types.typeObject("PyTuple_Type"));
 }
 
 pub inline fn PyList_Check(obj: *PyObject) bool {
-    return isTypeOrSubtype(obj, @ptrCast(&c.PyList_Type));
+    return isTypeOrSubtype(obj, types.typeObject("PyList_Type"));
 }
 
 pub inline fn PyDict_Check(obj: *PyObject) bool {
-    return isTypeOrSubtype(obj, @ptrCast(&c.PyDict_Type));
+    return isTypeOrSubtype(obj, types.typeObject("PyDict_Type"));
 }
 
 /// Check if an object is an instance of a type (or subtype)
@@ -78,11 +78,11 @@ pub inline fn PyObject_TypeCheck(obj: *PyObject, type_obj: *PyTypeObject) bool {
 }
 
 pub inline fn PySet_Check(obj: *PyObject) bool {
-    return isTypeOrSubtype(obj, @ptrCast(&c.PySet_Type));
+    return isTypeOrSubtype(obj, types.typeObject("PySet_Type"));
 }
 
 pub inline fn PyFrozenSet_Check(obj: *PyObject) bool {
-    return isTypeOrSubtype(obj, @ptrCast(&c.PyFrozenSet_Type));
+    return isTypeOrSubtype(obj, types.typeObject("PyFrozenSet_Type"));
 }
 
 pub inline fn PyAnySet_Check(obj: *PyObject) bool {
@@ -90,15 +90,15 @@ pub inline fn PyAnySet_Check(obj: *PyObject) bool {
 }
 
 pub inline fn PyBytes_Check(obj: *PyObject) bool {
-    return isTypeOrSubtype(obj, @ptrCast(&c.PyBytes_Type));
+    return isTypeOrSubtype(obj, types.typeObject("PyBytes_Type"));
 }
 
 pub inline fn PyByteArray_Check(obj: *PyObject) bool {
-    return isTypeOrSubtype(obj, @ptrCast(&c.PyByteArray_Type));
+    return isTypeOrSubtype(obj, types.typeObject("PyByteArray_Type"));
 }
 
 pub inline fn PyMemoryView_Check(obj: *PyObject) bool {
-    return isTypeOrSubtype(obj, @ptrCast(&c.PyMemoryView_Type));
+    return isTypeOrSubtype(obj, types.typeObject("PyMemoryView_Type"));
 }
 
 pub inline fn PyCallable_Check(obj: *PyObject) bool {

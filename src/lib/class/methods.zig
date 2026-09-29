@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const py = @import("../python.zig");
+const ft = @import("threading.zig");
 const conversion = @import("../conversion.zig");
 const Path = conversion.Path;
 
@@ -14,6 +15,8 @@ const class_mod = @import("mod.zig");
 const ClassInfo = class_mod.ClassInfo;
 const source_parser = @import("../source_parser.zig");
 const errors_mod = @import("../errors.zig");
+const awaitable = @import("../awaitable.zig");
+const async_mod = @import("async.zig");
 
 /// Build method wrappers for a given type
 pub fn MethodBuilder(comptime class_name: [*:0]const u8, comptime T: type, comptime PyWrapper: type, comptime class_infos: []const ClassInfo, comptime slot_dunders: []const []const u8) type {
@@ -234,7 +237,7 @@ pub fn MethodBuilder(comptime class_name: [*:0]const u8, comptime T: type, compt
                 if (isInstanceMethod(decl.name)) {
                     m[idx] = .{
                         .ml_name = @ptrCast(decl.name.ptr),
-                        .ml_meth = @ptrCast(generateMethodWrapper(decl.name)),
+                        .ml_meth = @ptrCast(ft.locked(T, generateMethodWrapper(decl.name))),
                         .ml_flags = py.METH_VARARGS,
                         .ml_doc = stubs_mod.buildMlDoc(
                             decl.name,
@@ -327,7 +330,7 @@ pub fn MethodBuilder(comptime class_name: [*:0]const u8, comptime T: type, compt
             defer py.c.Py_DecRef(types_mod);
 
             const ga_type = py.c.PyObject_GetAttrString(types_mod, "GenericAlias") orelse {
-                // Python 3.8: GenericAlias doesn't exist, return cls
+                // Defensive: types.GenericAlias exists on every supported version (3.10+)
                 py.c.PyErr_Clear();
                 py.Py_IncRef(cls_obj);
                 return cls_obj;
@@ -378,6 +381,12 @@ pub fn MethodBuilder(comptime class_name: [*:0]const u8, comptime T: type, compt
                     // Call method with self pointer and extra args
                     const raw_result = callMethod(self.getData(), extra_args);
                     const result = unwrapSignatureValue(RawReturnType, raw_result);
+
+                    // __aenter__ / __aexit__ must return awaitables
+                    if (comptime async_mod.isAsyncMethodDunder(method_name)) {
+                        const Conv = conversion.Converter(class_infos);
+                        return awaitable.toAwaitable(Conv, T, ReturnType, result, .value, self_obj.?, self.getData());
+                    }
 
                     // Handle return - pass self_obj for potential "return self" pattern
                     return handleReturn(result, self_obj.?, self.getData());

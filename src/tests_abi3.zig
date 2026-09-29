@@ -1751,3 +1751,38 @@ test "abi3 - FailingResource failed __new__ does not call __del__" {
     );
     try std.testing.expect(try python.eval(bool, "abi3_failed_new_no_crash"));
 }
+
+test "ABI3 - asyncFn works on the Limited API" {
+    const python = try initTestPython();
+    try python.exec(
+        \\import asyncio
+        \\async def _abi3_main():
+        \\    return await example_abi3.async_add(20, 22)
+        \\_abi3_async = asyncio.run(_abi3_main())
+    );
+    try std.testing.expectEqual(@as(i64, 42), try python.eval(i64, "_abi3_async"));
+}
+
+test "ABI3 - async protocols via PyType_FromSpec slots" {
+    const python = try initTestPython();
+    try python.exec(
+        \\import asyncio
+        \\async def _abi3_proto():
+        \\    items = [x async for x in example_abi3.AsyncTicker(3)]
+        \\    last = await anext(example_abi3.AsyncTicker(0), "end")
+        \\    now = await example_abi3.AsyncTicker(9)
+        \\    t = example_abi3.AsyncTicker(5)
+        \\    async with t as same:
+        \\        inside = (same is t, t.n)
+        \\    return (items, last, now, inside, t.n)
+        \\_abi3_proto = repr(asyncio.run(_abi3_proto()))
+    );
+    try std.testing.expectEqualStrings("([2, 1, 0], 'end', 9, (True, 5), -1)", try python.eval([]const u8, "_abi3_proto"));
+}
+
+test "decimal_double - returns an owned Decimal (no dangling buffer)" {
+    const python = try initTestPython();
+    try python.exec("from decimal import Decimal");
+    try std.testing.expect(try python.eval(bool, "example_abi3.decimal_double(Decimal('1.5')) == Decimal('3')"));
+    try std.testing.expect(try python.eval(bool, "isinstance(example_abi3.decimal_double(Decimal('2.25')), Decimal)"));
+}

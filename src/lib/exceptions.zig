@@ -2,6 +2,7 @@
 //!
 //! Provides types and utilities for catching, raising, and defining
 //! Python exceptions from Zig code.
+const fmt_mod = @import("fmt.zig");
 
 const py = @import("python.zig");
 const PyObject = py.PyObject;
@@ -226,110 +227,110 @@ pub fn clearException() void {
 pub const Null = @TypeOf(null);
 
 /// Raise a Python exception with a message
-pub inline fn raiseException(exc_type: *PyObject, message: [*:0]const u8) Null {
-    py.PyErr_SetString(exc_type, message);
+pub inline fn raiseException(exc_type: *PyObject, message: anytype) Null {
+    fmt_mod.setError(exc_type, message);
     return null;
 }
 
 /// Raise a ValueError with a message
-pub inline fn raiseValueError(message: [*:0]const u8) Null {
-    py.PyErr_SetString(py.PyExc_ValueError(), message);
+pub inline fn raiseValueError(message: anytype) Null {
+    fmt_mod.setError(py.PyExc_ValueError(), message);
     return null;
 }
 
 /// Raise a TypeError with a message
-pub inline fn raiseTypeError(message: [*:0]const u8) Null {
-    py.PyErr_SetString(py.PyExc_TypeError(), message);
+pub inline fn raiseTypeError(message: anytype) Null {
+    fmt_mod.setError(py.PyExc_TypeError(), message);
     return null;
 }
 
 /// Raise a RuntimeError with a message
-pub inline fn raiseRuntimeError(message: [*:0]const u8) Null {
-    py.PyErr_SetString(py.PyExc_RuntimeError(), message);
+pub inline fn raiseRuntimeError(message: anytype) Null {
+    fmt_mod.setError(py.PyExc_RuntimeError(), message);
     return null;
 }
 
 /// Raise a KeyError with a message
-pub inline fn raiseKeyError(message: [*:0]const u8) Null {
-    py.PyErr_SetString(py.PyExc_KeyError(), message);
+pub inline fn raiseKeyError(message: anytype) Null {
+    fmt_mod.setError(py.PyExc_KeyError(), message);
     return null;
 }
 
 /// Raise an IndexError with a message
-pub inline fn raiseIndexError(message: [*:0]const u8) Null {
-    py.PyErr_SetString(py.PyExc_IndexError(), message);
+pub inline fn raiseIndexError(message: anytype) Null {
+    fmt_mod.setError(py.PyExc_IndexError(), message);
     return null;
 }
 
 /// Raise an AttributeError with a message
-pub inline fn raiseAttributeError(message: [*:0]const u8) Null {
-    py.PyErr_SetString(py.PyExc_AttributeError(), message);
+pub inline fn raiseAttributeError(message: anytype) Null {
+    fmt_mod.setError(py.PyExc_AttributeError(), message);
     return null;
 }
 
 /// Raise a MemoryError with a message
-pub inline fn raiseMemoryError(message: [*:0]const u8) Null {
-    py.PyErr_SetString(py.PyExc_MemoryError(), message);
+pub inline fn raiseMemoryError(message: anytype) Null {
+    fmt_mod.setError(py.PyExc_MemoryError(), message);
     return null;
 }
 
 /// Raise an OSError with a message
-pub inline fn raiseOSError(message: [*:0]const u8) Null {
-    py.PyErr_SetString(py.PyExc_OSError(), message);
+pub inline fn raiseOSError(message: anytype) Null {
+    fmt_mod.setError(py.PyExc_OSError(), message);
     return null;
 }
 
 /// Raise a NotImplementedError with a message
-pub inline fn raiseNotImplementedError(message: [*:0]const u8) Null {
-    py.PyErr_SetString(py.PyExc_NotImplementedError(), message);
+pub inline fn raiseNotImplementedError(message: anytype) Null {
+    fmt_mod.setError(py.PyExc_NotImplementedError(), message);
     return null;
 }
 
 /// Raise an OverflowError with a message
-pub inline fn raiseOverflowError(message: [*:0]const u8) Null {
-    py.PyErr_SetString(py.PyExc_OverflowError(), message);
+pub inline fn raiseOverflowError(message: anytype) Null {
+    fmt_mod.setError(py.PyExc_OverflowError(), message);
     return null;
 }
 
 /// Raise a ZeroDivisionError with a message
-pub inline fn raiseZeroDivisionError(message: [*:0]const u8) Null {
-    py.PyErr_SetString(py.PyExc_ZeroDivisionError(), message);
+pub inline fn raiseZeroDivisionError(message: anytype) Null {
+    fmt_mod.setError(py.PyExc_ZeroDivisionError(), message);
     return null;
 }
 
 /// Raise a FileNotFoundError with a message
-pub inline fn raiseFileNotFoundError(message: [*:0]const u8) Null {
-    py.PyErr_SetString(py.PyExc_FileNotFoundError(), message);
+pub inline fn raiseFileNotFoundError(message: anytype) Null {
+    fmt_mod.setError(py.PyExc_FileNotFoundError(), message);
     return null;
 }
 
 /// Raise a PermissionError with a message
-pub inline fn raisePermissionError(message: [*:0]const u8) Null {
-    py.PyErr_SetString(py.PyExc_PermissionError(), message);
+pub inline fn raisePermissionError(message: anytype) Null {
+    fmt_mod.setError(py.PyExc_PermissionError(), message);
     return null;
 }
 
 /// Raise a TimeoutError with a message
-pub inline fn raiseTimeoutError(message: [*:0]const u8) Null {
-    py.PyErr_SetString(py.PyExc_TimeoutError(), message);
+pub inline fn raiseTimeoutError(message: anytype) Null {
+    fmt_mod.setError(py.PyExc_TimeoutError(), message);
     return null;
 }
 
 /// Raise a ConnectionError with a message
-pub inline fn raiseConnectionError(message: [*:0]const u8) Null {
-    py.PyErr_SetString(py.PyExc_ConnectionError(), message);
+pub inline fn raiseConnectionError(message: anytype) Null {
+    fmt_mod.setError(py.PyExc_ConnectionError(), message);
     return null;
 }
 
 /// Raise an EOFError with a message
-pub inline fn raiseEOFError(message: [*:0]const u8) Null {
-    py.PyErr_SetString(py.PyExc_EOFError(), message);
+pub inline fn raiseEOFError(message: anytype) Null {
+    fmt_mod.setError(py.PyExc_EOFError(), message);
     return null;
 }
 
 /// Raise an ImportError with a message
-pub inline fn raiseImportError(message: [*:0]const u8) Null {
-    py.PyErr_SetString(py.PyExc_ImportError(), message);
+pub inline fn raiseImportError(message: anytype) Null {
+    fmt_mod.setError(py.PyExc_ImportError(), message);
     return null;
 }
 
@@ -340,62 +341,62 @@ pub inline fn raiseStopIteration() Null {
 }
 
 /// Raise a SystemError with a message
-pub inline fn raiseSystemError(message: [*:0]const u8) Null {
-    py.PyErr_SetString(py.PyExc_SystemError(), message);
+pub inline fn raiseSystemError(message: anytype) Null {
+    fmt_mod.setError(py.PyExc_SystemError(), message);
     return null;
 }
 
 /// Raise a BufferError with a message
-pub inline fn raiseBufferError(message: [*:0]const u8) Null {
-    py.PyErr_SetString(py.PyExc_BufferError(), message);
+pub inline fn raiseBufferError(message: anytype) Null {
+    fmt_mod.setError(py.PyExc_BufferError(), message);
     return null;
 }
 
 /// Raise an ArithmeticError with a message
-pub inline fn raiseArithmeticError(message: [*:0]const u8) Null {
-    py.PyErr_SetString(py.PyExc_ArithmeticError(), message);
+pub inline fn raiseArithmeticError(message: anytype) Null {
+    fmt_mod.setError(py.PyExc_ArithmeticError(), message);
     return null;
 }
 
 /// Raise a RecursionError with a message
-pub inline fn raiseRecursionError(message: [*:0]const u8) Null {
-    py.PyErr_SetString(py.PyExc_RecursionError(), message);
+pub inline fn raiseRecursionError(message: anytype) Null {
+    fmt_mod.setError(py.PyExc_RecursionError(), message);
     return null;
 }
 
 /// Raise an AssertionError with a message
-pub inline fn raiseAssertionError(message: [*:0]const u8) Null {
-    py.PyErr_SetString(py.PyExc_AssertionError(), message);
+pub inline fn raiseAssertionError(message: anytype) Null {
+    fmt_mod.setError(py.PyExc_AssertionError(), message);
     return null;
 }
 
 /// Raise a FloatingPointError with a message
-pub inline fn raiseFloatingPointError(message: [*:0]const u8) Null {
-    py.PyErr_SetString(py.PyExc_FloatingPointError(), message);
+pub inline fn raiseFloatingPointError(message: anytype) Null {
+    fmt_mod.setError(py.PyExc_FloatingPointError(), message);
     return null;
 }
 
 /// Raise a LookupError with a message
-pub inline fn raiseLookupError(message: [*:0]const u8) Null {
-    py.PyErr_SetString(py.PyExc_LookupError(), message);
+pub inline fn raiseLookupError(message: anytype) Null {
+    fmt_mod.setError(py.PyExc_LookupError(), message);
     return null;
 }
 
 /// Raise a NameError with a message
-pub inline fn raiseNameError(message: [*:0]const u8) Null {
-    py.PyErr_SetString(py.PyExc_NameError(), message);
+pub inline fn raiseNameError(message: anytype) Null {
+    fmt_mod.setError(py.PyExc_NameError(), message);
     return null;
 }
 
 /// Raise an UnboundLocalError with a message
-pub inline fn raiseUnboundLocalError(message: [*:0]const u8) Null {
-    py.PyErr_SetString(py.PyExc_UnboundLocalError(), message);
+pub inline fn raiseUnboundLocalError(message: anytype) Null {
+    fmt_mod.setError(py.PyExc_UnboundLocalError(), message);
     return null;
 }
 
 /// Raise a ReferenceError with a message
-pub inline fn raiseReferenceError(message: [*:0]const u8) Null {
-    py.PyErr_SetString(py.PyExc_ReferenceError(), message);
+pub inline fn raiseReferenceError(message: anytype) Null {
+    fmt_mod.setError(py.PyExc_ReferenceError(), message);
     return null;
 }
 
@@ -406,86 +407,86 @@ pub inline fn raiseStopAsyncIteration() Null {
 }
 
 /// Raise a SyntaxError with a message
-pub inline fn raiseSyntaxError(message: [*:0]const u8) Null {
-    py.PyErr_SetString(py.PyExc_SyntaxError(), message);
+pub inline fn raiseSyntaxError(message: anytype) Null {
+    fmt_mod.setError(py.PyExc_SyntaxError(), message);
     return null;
 }
 
 /// Raise a UnicodeError with a message
-pub inline fn raiseUnicodeError(message: [*:0]const u8) Null {
-    py.PyErr_SetString(py.PyExc_UnicodeError(), message);
+pub inline fn raiseUnicodeError(message: anytype) Null {
+    fmt_mod.setError(py.PyExc_UnicodeError(), message);
     return null;
 }
 
 /// Raise a ModuleNotFoundError with a message
-pub inline fn raiseModuleNotFoundError(message: [*:0]const u8) Null {
-    py.PyErr_SetString(py.PyExc_ModuleNotFoundError(), message);
+pub inline fn raiseModuleNotFoundError(message: anytype) Null {
+    fmt_mod.setError(py.PyExc_ModuleNotFoundError(), message);
     return null;
 }
 
 /// Raise a BlockingIOError with a message
-pub inline fn raiseBlockingIOError(message: [*:0]const u8) Null {
-    py.PyErr_SetString(py.PyExc_BlockingIOError(), message);
+pub inline fn raiseBlockingIOError(message: anytype) Null {
+    fmt_mod.setError(py.PyExc_BlockingIOError(), message);
     return null;
 }
 
 /// Raise a BrokenPipeError with a message
-pub inline fn raiseBrokenPipeError(message: [*:0]const u8) Null {
-    py.PyErr_SetString(py.PyExc_BrokenPipeError(), message);
+pub inline fn raiseBrokenPipeError(message: anytype) Null {
+    fmt_mod.setError(py.PyExc_BrokenPipeError(), message);
     return null;
 }
 
 /// Raise a ChildProcessError with a message
-pub inline fn raiseChildProcessError(message: [*:0]const u8) Null {
-    py.PyErr_SetString(py.PyExc_ChildProcessError(), message);
+pub inline fn raiseChildProcessError(message: anytype) Null {
+    fmt_mod.setError(py.PyExc_ChildProcessError(), message);
     return null;
 }
 
 /// Raise a ConnectionAbortedError with a message
-pub inline fn raiseConnectionAbortedError(message: [*:0]const u8) Null {
-    py.PyErr_SetString(py.PyExc_ConnectionAbortedError(), message);
+pub inline fn raiseConnectionAbortedError(message: anytype) Null {
+    fmt_mod.setError(py.PyExc_ConnectionAbortedError(), message);
     return null;
 }
 
 /// Raise a ConnectionRefusedError with a message
-pub inline fn raiseConnectionRefusedError(message: [*:0]const u8) Null {
-    py.PyErr_SetString(py.PyExc_ConnectionRefusedError(), message);
+pub inline fn raiseConnectionRefusedError(message: anytype) Null {
+    fmt_mod.setError(py.PyExc_ConnectionRefusedError(), message);
     return null;
 }
 
 /// Raise a ConnectionResetError with a message
-pub inline fn raiseConnectionResetError(message: [*:0]const u8) Null {
-    py.PyErr_SetString(py.PyExc_ConnectionResetError(), message);
+pub inline fn raiseConnectionResetError(message: anytype) Null {
+    fmt_mod.setError(py.PyExc_ConnectionResetError(), message);
     return null;
 }
 
 /// Raise a FileExistsError with a message
-pub inline fn raiseFileExistsError(message: [*:0]const u8) Null {
-    py.PyErr_SetString(py.PyExc_FileExistsError(), message);
+pub inline fn raiseFileExistsError(message: anytype) Null {
+    fmt_mod.setError(py.PyExc_FileExistsError(), message);
     return null;
 }
 
 /// Raise an InterruptedError with a message
-pub inline fn raiseInterruptedError(message: [*:0]const u8) Null {
-    py.PyErr_SetString(py.PyExc_InterruptedError(), message);
+pub inline fn raiseInterruptedError(message: anytype) Null {
+    fmt_mod.setError(py.PyExc_InterruptedError(), message);
     return null;
 }
 
 /// Raise an IsADirectoryError with a message
-pub inline fn raiseIsADirectoryError(message: [*:0]const u8) Null {
-    py.PyErr_SetString(py.PyExc_IsADirectoryError(), message);
+pub inline fn raiseIsADirectoryError(message: anytype) Null {
+    fmt_mod.setError(py.PyExc_IsADirectoryError(), message);
     return null;
 }
 
 /// Raise a NotADirectoryError with a message
-pub inline fn raiseNotADirectoryError(message: [*:0]const u8) Null {
-    py.PyErr_SetString(py.PyExc_NotADirectoryError(), message);
+pub inline fn raiseNotADirectoryError(message: anytype) Null {
+    fmt_mod.setError(py.PyExc_NotADirectoryError(), message);
     return null;
 }
 
 /// Raise a ProcessLookupError with a message
-pub inline fn raiseProcessLookupError(message: [*:0]const u8) Null {
-    py.PyErr_SetString(py.PyExc_ProcessLookupError(), message);
+pub inline fn raiseProcessLookupError(message: anytype) Null {
+    fmt_mod.setError(py.PyExc_ProcessLookupError(), message);
     return null;
 }
 

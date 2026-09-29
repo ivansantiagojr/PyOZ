@@ -5,11 +5,42 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const Io = std.Io;
+
+/// Upper bound on module size we are willing to load for inspection.
+const max_module_size = 512 * 1024 * 1024;
+
+/// In-memory view of a module file with a seek/read cursor.
+/// The whole file is read once; parsers then work on the slice, which avoids
+/// hundreds of small seek/read syscalls and makes short reads impossible.
+const Blob = struct {
+    data: []const u8,
+    pos: u64 = 0,
+
+    fn seekTo(self: *Blob, offset: u64) error{Unseekable}!void {
+        if (offset > self.data.len) return error.Unseekable;
+        self.pos = offset;
+    }
+
+    fn read(self: *Blob, buf: []u8) error{}!usize {
+        const start: usize = @intCast(self.pos);
+        const n = @min(buf.len, self.data.len - start);
+        @memcpy(buf[0..n], self.data[start..][0..n]);
+        self.pos += n;
+        return n;
+    }
+};
+
+fn loadModule(io: Io, allocator: std.mem.Allocator, module_path: []const u8) ?[]u8 {
+    return Io.Dir.cwd().readFileAlloc(io, module_path, allocator, .limited(max_module_size)) catch null;
+}
 
 /// Read stubs data directly from a compiled module file
-pub fn extractStubs(allocator: std.mem.Allocator, module_path: []const u8) !?[]const u8 {
-    const file = std.fs.cwd().openFile(module_path, .{}) catch return null;
-    defer file.close();
+pub fn extractStubs(io: Io, allocator: std.mem.Allocator, module_path: []const u8) !?[]const u8 {
+    const bytes = loadModule(io, allocator, module_path) orelse return null;
+    defer allocator.free(bytes);
+    var blob: Blob = .{ .data = bytes };
+    const file = &blob;
 
     // Read magic bytes to determine file format
     var magic: [4]u8 = undefined;
@@ -43,7 +74,7 @@ pub fn extractStubs(allocator: std.mem.Allocator, module_path: []const u8) !?[]c
 // ELF Parser (Linux)
 // =============================================================================
 
-fn extractFromElf(allocator: std.mem.Allocator, file: std.fs.File) !?[]const u8 {
+fn extractFromElf(allocator: std.mem.Allocator, file: *Blob) !?[]const u8 {
     const elf = std.elf;
 
     // Read ELF header
@@ -124,12 +155,12 @@ fn extractFromElf(allocator: std.mem.Allocator, file: std.fs.File) !?[]const u8 
 }
 
 /// Extract data from a section with format: magic (8 bytes) + 8-byte length + content
-fn extractFromSection(allocator: std.mem.Allocator, file: std.fs.File, offset: u64, size: u64) !?[]const u8 {
+fn extractFromSection(allocator: std.mem.Allocator, file: *Blob, offset: u64, size: u64) !?[]const u8 {
     return extractFromSectionWithMagic(allocator, file, offset, size, "PYOZSTUB");
 }
 
 /// Generic section extraction with configurable magic string
-fn extractFromSectionWithMagic(allocator: std.mem.Allocator, file: std.fs.File, offset: u64, size: u64, magic: *const [8]u8) !?[]const u8 {
+fn extractFromSectionWithMagic(allocator: std.mem.Allocator, file: *Blob, offset: u64, size: u64, magic: *const [8]u8) !?[]const u8 {
     if (size < 16) return null; // Need at least header
 
     file.seekTo(offset) catch return null;
@@ -163,9 +194,11 @@ fn extractFromSectionWithMagic(allocator: std.mem.Allocator, file: std.fs.File, 
 
 /// Extract data from a named section in a compiled module file.
 /// Searches for the section by name in ELF/PE/MachO format.
-fn extractNamedSection(allocator: std.mem.Allocator, module_path: []const u8, elf_name: []const u8, macho_name: []const u8, magic: *const [8]u8) !?[]const u8 {
-    const file = std.fs.cwd().openFile(module_path, .{}) catch return null;
-    defer file.close();
+fn extractNamedSection(io: Io, allocator: std.mem.Allocator, module_path: []const u8, elf_name: []const u8, macho_name: []const u8, magic: *const [8]u8) !?[]const u8 {
+    const bytes = loadModule(io, allocator, module_path) orelse return null;
+    defer allocator.free(bytes);
+    var blob: Blob = .{ .data = bytes };
+    const file = &blob;
 
     var file_magic: [4]u8 = undefined;
     _ = file.read(&file_magic) catch return null;
@@ -185,7 +218,7 @@ fn extractNamedSection(allocator: std.mem.Allocator, module_path: []const u8, el
 }
 
 /// ELF: find a named section and extract its content
-fn extractNamedSectionElf(allocator: std.mem.Allocator, file: std.fs.File, section_name: []const u8, magic: *const [8]u8) !?[]const u8 {
+fn extractNamedSectionElf(allocator: std.mem.Allocator, file: *Blob, section_name: []const u8, magic: *const [8]u8) !?[]const u8 {
     const elf = std.elf;
 
     var ehdr: elf.Elf64_Ehdr = undefined;
@@ -221,7 +254,7 @@ fn extractNamedSectionElf(allocator: std.mem.Allocator, file: std.fs.File, secti
 }
 
 /// PE: find a named section and extract its content
-fn extractNamedSectionPe(allocator: std.mem.Allocator, file: std.fs.File, section_name: []const u8, magic: *const [8]u8) !?[]const u8 {
+fn extractNamedSectionPe(allocator: std.mem.Allocator, file: *Blob, section_name: []const u8, magic: *const [8]u8) !?[]const u8 {
     var dos_header: [64]u8 = undefined;
     _ = file.read(&dos_header) catch return null;
 
@@ -260,7 +293,7 @@ fn extractNamedSectionPe(allocator: std.mem.Allocator, file: std.fs.File, sectio
 }
 
 /// MachO: find a named section and extract its content
-fn extractNamedSectionMachO(allocator: std.mem.Allocator, file: std.fs.File, section_name: []const u8, magic_bytes: *const [8]u8) !?[]const u8 {
+fn extractNamedSectionMachO(allocator: std.mem.Allocator, file: *Blob, section_name: []const u8, magic_bytes: *const [8]u8) !?[]const u8 {
     var header: [32]u8 = undefined;
     _ = file.read(&header) catch return null;
 
@@ -307,9 +340,11 @@ fn extractNamedSectionMachO(allocator: std.mem.Allocator, file: std.fs.File, sec
 
 /// Check if a compiled module exports a specific symbol (e.g., "PyInit__liburing").
 /// Used to validate that the module's export function matches the expected name.
-pub fn hasExportSymbol(allocator: std.mem.Allocator, module_path: []const u8, symbol_name: []const u8) bool {
-    const file = std.fs.cwd().openFile(module_path, .{}) catch return false;
-    defer file.close();
+pub fn hasExportSymbol(io: Io, allocator: std.mem.Allocator, module_path: []const u8, symbol_name: []const u8) bool {
+    const bytes = loadModule(io, allocator, module_path) orelse return false;
+    defer allocator.free(bytes);
+    var blob: Blob = .{ .data = bytes };
+    const file = &blob;
 
     var magic: [4]u8 = undefined;
     _ = file.read(&magic) catch return false;
@@ -330,7 +365,7 @@ pub fn hasExportSymbol(allocator: std.mem.Allocator, module_path: []const u8, sy
 }
 
 /// Check if an ELF file exports a specific symbol via .dynsym
-fn elfHasSymbol(allocator: std.mem.Allocator, file: std.fs.File, symbol_name: []const u8) bool {
+fn elfHasSymbol(allocator: std.mem.Allocator, file: *Blob, symbol_name: []const u8) bool {
     const elf = std.elf;
 
     var ehdr: elf.Elf64_Ehdr = undefined;
@@ -384,7 +419,7 @@ fn elfHasSymbol(allocator: std.mem.Allocator, file: std.fs.File, symbol_name: []
 }
 
 /// Check if an ELF symbol table contains a specific symbol name
-fn elfSymtabContains(allocator: std.mem.Allocator, file: std.fs.File, symtab: std.elf.Elf64_Shdr, strtab: std.elf.Elf64_Shdr, symbol_name: []const u8) bool {
+fn elfSymtabContains(allocator: std.mem.Allocator, file: *Blob, symtab: std.elf.Elf64_Shdr, strtab: std.elf.Elf64_Shdr, symbol_name: []const u8) bool {
     const strtab_data = allocator.alloc(u8, strtab.sh_size) catch return false;
     defer allocator.free(strtab_data);
     file.seekTo(strtab.sh_offset) catch return false;
@@ -407,7 +442,7 @@ fn elfSymtabContains(allocator: std.mem.Allocator, file: std.fs.File, symtab: st
 }
 
 /// Check if a PE file exports a specific symbol
-fn peHasSymbol(allocator: std.mem.Allocator, file: std.fs.File, symbol_name: []const u8) bool {
+fn peHasSymbol(allocator: std.mem.Allocator, file: *Blob, symbol_name: []const u8) bool {
     _ = allocator;
 
     // Read DOS header
@@ -491,18 +526,18 @@ fn peHasSymbol(allocator: std.mem.Allocator, file: std.fs.File, symbol_name: []c
 }
 
 /// Read test data directly from a compiled module file
-pub fn extractTests(allocator: std.mem.Allocator, module_path: []const u8) !?[]const u8 {
-    return extractNamedSection(allocator, module_path, ".pyoztest", "__pyoztest", "PYOZTEST");
+pub fn extractTests(io: Io, allocator: std.mem.Allocator, module_path: []const u8) !?[]const u8 {
+    return extractNamedSection(io, allocator, module_path, ".pyoztest", "__pyoztest", "PYOZTEST");
 }
 
 /// Read benchmark data directly from a compiled module file
-pub fn extractBenchmarks(allocator: std.mem.Allocator, module_path: []const u8) !?[]const u8 {
-    return extractNamedSection(allocator, module_path, ".pyozbenc", "__pyozbenc", "PYOZBENC");
+pub fn extractBenchmarks(io: Io, allocator: std.mem.Allocator, module_path: []const u8) !?[]const u8 {
+    return extractNamedSection(io, allocator, module_path, ".pyozbenc", "__pyozbenc", "PYOZBENC");
 }
 
 fn findElfSymbol(
     allocator: std.mem.Allocator,
-    file: std.fs.File,
+    file: *Blob,
     symtab_shdr: std.elf.Elf64_Shdr,
     strtab_shdr: std.elf.Elf64_Shdr,
     ehdr: std.elf.Elf64_Ehdr,
@@ -628,7 +663,7 @@ const PeSection = struct {
     raw_offset: u32,
 };
 
-fn extractFromPe(allocator: std.mem.Allocator, file: std.fs.File) !?[]const u8 {
+fn extractFromPe(allocator: std.mem.Allocator, file: *Blob) !?[]const u8 {
     // Read DOS header
     var dos_header: [64]u8 = undefined;
     _ = file.read(&dos_header) catch return null;
@@ -752,7 +787,7 @@ fn rvaToFileOffset(rva: u32, sections: []const PeSection) ?u32 {
 
 fn findPeExportedSymbols(
     allocator: std.mem.Allocator,
-    file: std.fs.File,
+    file: *Blob,
     sections: []const PeSection,
     export_dir_rva: u32,
     is_64bit: bool,
@@ -893,7 +928,7 @@ fn findPeExportedSymbols(
 
 fn findPeCoffSymbols(
     allocator: std.mem.Allocator,
-    file: std.fs.File,
+    file: *Blob,
     symtab_offset: u32,
     num_symbols: u32,
     sections: []const PeSection,
@@ -1022,7 +1057,7 @@ const MachOSegment = struct {
     vmsize: u64,
 };
 
-fn extractFromMachO64(allocator: std.mem.Allocator, file: std.fs.File) !?[]const u8 {
+fn extractFromMachO64(allocator: std.mem.Allocator, file: *Blob) !?[]const u8 {
     // Mach-O 64-bit header (little-endian)
     var header: [32]u8 = undefined;
     _ = file.read(&header) catch return null;
@@ -1187,7 +1222,7 @@ fn extractFromMachO64(allocator: std.mem.Allocator, file: std.fs.File) !?[]const
     return stubs;
 }
 
-fn extractFromMachO64BE(allocator: std.mem.Allocator, file: std.fs.File) !?[]const u8 {
+fn extractFromMachO64BE(allocator: std.mem.Allocator, file: *Blob) !?[]const u8 {
     // Big-endian Mach-O - rare, skip for now
     _ = allocator;
     _ = file;

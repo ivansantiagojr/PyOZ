@@ -20,6 +20,7 @@ const abi3_enabled = types.abi3_enabled;
 
 // In non-ABI3 mode, we use the fast C API
 // In ABI3 mode, we cache the datetime module and classes for efficiency
+const lazy = @import("lazy.zig");
 var datetime_module: ?*PyObject = null;
 var date_class: ?*PyObject = null;
 var datetime_class: ?*PyObject = null;
@@ -30,28 +31,43 @@ var timedelta_class: ?*PyObject = null;
 var datetime_api: if (!abi3_enabled) ?*c.PyDateTime_CAPI else void =
     if (!abi3_enabled) null else {};
 
+// Free-threading safety: each cache slot is written exactly once, by a
+// successful compare-and-swap (failed CASes don't write), and `dt_ready` is
+// set with release ordering only after every slot is published. Readers only
+// touch the slots after observing `dt_ready`, so plain reads never race.
+var dt_ready: lazy.ReadyFlag = .{};
+
+fn publishOnce(slot: *?*PyObject, value: *PyObject) void {
+    if (@cmpxchgStrong(?*PyObject, slot, null, value, .acq_rel, .acquire) != null) {
+        refcount.Py_DecRef(value);
+    }
+}
+
 /// Ensure datetime API/module is initialized (called automatically by datetime functions)
 fn ensureDateTimeAPI() bool {
+    if (dt_ready.isSet()) return true;
     if (abi3_enabled) {
         // ABI3 mode: import the datetime module and cache classes
-        if (datetime_module != null) return true;
-
-        datetime_module = c.PyImport_ImportModule("datetime");
-        if (datetime_module == null) return false;
-
-        date_class = c.PyObject_GetAttrString(datetime_module, "date");
-        datetime_class = c.PyObject_GetAttrString(datetime_module, "datetime");
-        time_class = c.PyObject_GetAttrString(datetime_module, "time");
-        timedelta_class = c.PyObject_GetAttrString(datetime_module, "timedelta");
-
-        return date_class != null and datetime_class != null and
-            time_class != null and timedelta_class != null;
+        const module = c.PyImport_ImportModule("datetime") orelse return false;
+        const names = [_][*:0]const u8{ "date", "datetime", "time", "timedelta" };
+        const slots = [_]*?*PyObject{ &date_class, &datetime_class, &time_class, &timedelta_class };
+        var fetched: [names.len]*PyObject = undefined;
+        for (names, 0..) |name, i| {
+            fetched[i] = c.PyObject_GetAttrString(module, name) orelse {
+                for (fetched[0..i]) |o| refcount.Py_DecRef(o);
+                refcount.Py_DecRef(module);
+                return false;
+            };
+        }
+        for (slots, fetched) |slot, obj| publishOnce(slot, obj);
+        publishOnce(&datetime_module, module);
     } else {
-        // Non-ABI3 mode: use the C API capsule
-        if (datetime_api != null) return true;
-        datetime_api = @ptrCast(@alignCast(c.PyCapsule_Import("datetime.datetime_CAPI", 0)));
-        return datetime_api != null;
+        // Non-ABI3 mode: use the C API capsule (process-global; same pointer for every caller)
+        const api: *c.PyDateTime_CAPI = @ptrCast(@alignCast(c.PyCapsule_Import("datetime.datetime_CAPI", 0) orelse return false));
+        _ = @cmpxchgStrong(?*c.PyDateTime_CAPI, &datetime_api, null, api, .acq_rel, .acquire);
     }
+    dt_ready.set();
+    return true;
 }
 
 /// Explicitly initialize the datetime API (optional - happens automatically on first use)
@@ -61,11 +77,7 @@ pub fn PyDateTime_Import() bool {
 
 /// Check if datetime API is initialized
 pub fn PyDateTime_IsInitialized() bool {
-    if (abi3_enabled) {
-        return datetime_module != null;
-    } else {
-        return datetime_api != null;
-    }
+    return dt_ready.isSet();
 }
 
 /// Create a date object

@@ -155,7 +155,11 @@ pub fn LifecycleBuilder(
         // Freelist support: if T declares __freelist__ = N, we cache up to N
         // deallocated objects for reuse instead of freeing them.
         const freelist_size = if (@hasDecl(T, "__freelist__")) @field(T, "__freelist__") else 0;
-        const has_freelist = freelist_size > 0;
+        // Disabled on free-threaded builds: a shared freelist would race, and
+        // re-arming a cached object's header needs its owning thread id
+        // (ob_tid) and split refcounts, which CPython exposes no public API for.
+        // The per-thread mimalloc heaps of free-threaded CPython fill this role.
+        const has_freelist = freelist_size > 0 and !py.types.gil_disabled;
 
         var freelist: [freelist_size]?*py.PyObject = [_]?*py.PyObject{null} ** freelist_size;
         var freelist_count: usize = 0;

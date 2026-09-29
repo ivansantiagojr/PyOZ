@@ -4,6 +4,7 @@
 //! from Zig functions, with support for keyword arguments and error mapping.
 
 const std = @import("std");
+const aio = @import("aio.zig");
 const py = @import("python.zig");
 const PyObject = py.PyObject;
 const conversion = @import("conversion.zig");
@@ -319,6 +320,7 @@ pub fn wrapFunctionWithErrorMapping(comptime zig_func: anytype, comptime class_i
 
             if (rt_info == .error_union) {
                 if (result) |value| {
+                    if (comptime aio.isAsyncPending(@TypeOf(value))) return value.bind(Conv, error_mappings);
                     return Conv.toPy(@TypeOf(value), value);
                 } else |err| {
                     setMappedError(err);
@@ -515,6 +517,17 @@ pub fn FuncDefEntry(comptime Func: type) type {
         name: [*:0]const u8,
         func: Func,
         doc: ?[*:0]const u8,
+        /// Comma-separated Python parameter names for stubs and `help()`.
+        /// Zig reflection cannot recover parameter names, so without this
+        /// they appear as arg0, arg1, ...
+        params: ?[]const u8 = null,
+
+        /// Name the Python-visible parameters, e.g. `.withParams("url, timeout")`.
+        pub fn withParams(self: @This(), comptime names: []const u8) @This() {
+            var copy = self;
+            copy.params = names;
+            return copy;
+        }
     };
 }
 

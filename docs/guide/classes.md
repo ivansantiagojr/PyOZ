@@ -113,6 +113,18 @@ PyOZ auto-detects method types based on the first parameter:
 
 Use `*const Self` for methods that don't modify the instance.
 
+### Async Methods
+
+`pyoz.asyncMethod` exposes an awaitable method. The `self` parameter type decides
+how the object reaches the worker thread (`self: T` = copy, `self: *const T` =
+borrow on frozen classes); unsafe forms are compile errors. See
+[Async methods](async.md#async-methods).
+
+```zig
+fn slowNormImpl(self: *const Vec, io: std.Io, ms: i64) !f64 { ... }
+pub const slow_norm = pyoz.asyncMethod(slowNormImpl);
+```
+
 ## Docstrings
 
 Add documentation using special constants:
@@ -245,6 +257,19 @@ Store iteration state in instance fields.
 | `__enter__(self: *T) *T` | Enter `with` block, return context |
 | `__exit__(self: *T) bool` | Exit block; return `true` to suppress exceptions |
 
+### Async Protocols
+
+| Method | Purpose |
+|--------|---------|
+| `__aiter__(self: *T) *T` | Return async iterator (usually self) |
+| `__anext__(self: *T) ?T` | Next item as an awaitable, or `null` for StopAsyncIteration |
+| `__await__(self: *const T) T` | Make instances awaitable |
+| `__aenter__(self: *T) *T` | Enter `async with` block |
+| `__aexit__(self: *T, exc_type, exc, tb) bool` | Exit block; return `true` to suppress exceptions |
+
+Results can be plain values (completed immediately) or `pyoz.asyncFn` results
+that run on a `std.Io` task. See [Async](async.md#async-protocols).
+
 ### Descriptor Protocol
 
 For custom attribute behavior on other classes:
@@ -278,7 +303,7 @@ const Point = struct {
 
 Python:
 ```python
-Point[int]          # returns types.GenericAlias on Python 3.9+
+Point[int]          # returns types.GenericAlias
 Point[int, float]   # multiple type parameters
 ```
 
@@ -288,7 +313,7 @@ def transform(points: list[Point[float]]) -> Point[float]:
     ...
 ```
 
-Works in ABI3 mode. On Python 3.8, falls back to returning the class itself.
+Works in ABI3 mode.
 
 ## Class Configuration
 
@@ -336,6 +361,13 @@ const Token = struct {
 When an object is garbage-collected, it's pushed onto the freelist instead of being freed. The next `Token(...)` call reuses a pooled object, skipping allocation. Objects are fully re-initialized on reuse.
 
 Only applies to simple types (no `__dict__`, no weakrefs). The freelist is a fixed-size static array — once full, excess objects are freed normally.
+
+!!! note "Free-threaded builds"
+    On free-threaded CPython `__freelist__` is ignored (the interpreter's
+    per-thread allocator plays that role). Class methods, properties and
+    protocol slots run inside a per-object lock there; set
+    `pub const __lock__ = false;` to opt out for immutable or internally
+    synchronized types. See [Free-Threading](free-threading.md).
 
 ### Inheritance from Built-in Types
 

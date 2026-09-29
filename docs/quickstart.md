@@ -101,7 +101,7 @@ This compiles your module and creates a wheel in `dist/`:
 
 ```
 dist/
-└── mymodule-0.1.0-cp310-cp310-linux_x86_64.whl
+└── mymodule-0.1.0-cp310-cp310-manylinux_2_17_x86_64.whl
 ```
 
 ### Step 4: Install and Test

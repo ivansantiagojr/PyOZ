@@ -8,14 +8,14 @@
 //!
 //! ABI3 mode is controlled via build options:
 //! ```
-//! zig build example -Dabi3=true -Dabi3-version=3.8
+//! zig build example -Dabi3=true
 //! ```
 //!
 //! Or in pyproject.toml:
 //! ```toml
 //! [tool.pyoz]
 //! abi3 = true
-//! abi3-min-version = "3.8"
+//! (the minimum is fixed at Python 3.10; see python/types.zig)
 //! ```
 
 const std = @import("std");
@@ -34,8 +34,10 @@ pub const abi3_enabled = enabled;
 
 /// The minimum Python version for ABI3 compatibility.
 /// Format: 0x03XXYYZZ where XX=major, YY=minor, ZZ=micro
-/// Default: 0x03080000 (Python 3.8)
-pub const min_version: u32 = build_options.abi3_version;
+/// Python 3.10. Derived from python/types.zig so the Py_LIMITED_API define and
+/// these version checks can never disagree. (Previously read from a build
+/// option that no build script defined.)
+pub const min_version: u32 = @import("python/types.zig").abi3_version_hex;
 
 /// Python version components extracted from min_version
 pub const version = struct {
@@ -292,9 +294,9 @@ pub fn SelectType(comptime Abi3Type: type, comptime FullType: type) type {
 // =============================================================================
 
 test "version parsing" {
-    // Default is 3.8.0
+    // Minimum is 3.10.0
     try std.testing.expectEqual(@as(u8, 3), version.major);
-    try std.testing.expectEqual(@as(u8, 8), version.minor);
+    try std.testing.expectEqual(@as(u8, 10), version.minor);
     try std.testing.expectEqual(@as(u8, 0), version.micro);
 }
 
@@ -318,8 +320,8 @@ test "feature flags consistency" {
 }
 
 test "version availability" {
-    // 3.8 should always be available with default min_version
-    try std.testing.expect(isVersionAvailable(3, 8));
+    // 3.10 is the minimum, so it is always available
+    try std.testing.expect(isVersionAvailable(3, 10));
 
     // If not in ABI3 mode, any version is "available"
     if (!enabled) {

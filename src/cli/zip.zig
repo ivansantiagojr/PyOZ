@@ -1,9 +1,6 @@
 const std = @import("std");
 
-// miniz C bindings
-const c = @cImport({
-    @cInclude("miniz.h");
-});
+const flate = std.compress.flate;
 
 /// Compression method for ZIP entries
 pub const CompressionMethod = enum(u16) {
@@ -11,78 +8,63 @@ pub const CompressionMethod = enum(u16) {
     deflate = 8,
 };
 
-/// Compress data using deflate algorithm
+/// Compress data with raw DEFLATE (no zlib/gzip framing), as ZIP requires.
+/// Pure Zig via std.compress.flate — replaces the vendored miniz C library,
+/// which Zig 0.16's C translator can no longer import.
 pub fn deflateCompress(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
-    if (data.len == 0) {
-        return allocator.alloc(u8, 0);
-    }
+    if (data.len == 0) return allocator.alloc(u8, 0);
 
-    // Allocate buffer for compressed data (worst case: slightly larger than input)
-    const max_compressed_size = c.mz_compressBound(@intCast(data.len));
-    const compressed = try allocator.alloc(u8, max_compressed_size);
-    errdefer allocator.free(compressed);
+    var out: std.Io.Writer.Allocating = try .initCapacity(allocator, data.len / 2 + 64);
+    defer out.deinit();
 
-    var compressed_size: c_ulong = max_compressed_size;
+    const window = try allocator.alloc(u8, flate.max_window_len);
+    defer allocator.free(window);
 
-    // Use raw deflate (no zlib header) for ZIP compatibility
-    var stream: c.mz_stream = std.mem.zeroes(c.mz_stream);
-    stream.next_in = data.ptr;
-    stream.avail_in = @intCast(data.len);
-    stream.next_out = compressed.ptr;
-    stream.avail_out = @intCast(compressed.len);
+    var compressor = try flate.Compress.init(&out.writer, window, .raw, .default);
+    try compressor.writer.writeAll(data);
+    try compressor.finish();
 
-    // Initialize deflate with raw deflate (negative window bits = no header)
-    if (c.mz_deflateInit2(&stream, c.MZ_DEFAULT_COMPRESSION, c.MZ_DEFLATED, -c.MZ_DEFAULT_WINDOW_BITS, 9, c.MZ_DEFAULT_STRATEGY) != c.MZ_OK) {
-        return error.DeflateInitFailed;
-    }
-    defer _ = c.mz_deflateEnd(&stream);
-
-    // Compress
-    if (c.mz_deflate(&stream, c.MZ_FINISH) != c.MZ_STREAM_END) {
-        return error.DeflateFailed;
-    }
-
-    compressed_size = stream.total_out;
-
-    // Resize to actual compressed size
-    return allocator.realloc(compressed, compressed_size);
+    return out.toOwnedSlice();
 }
 
-/// Decompress deflate data
+/// Decompress raw DEFLATE data of a known uncompressed size.
 pub fn deflateDecompress(allocator: std.mem.Allocator, compressed: []const u8, uncompressed_size: usize) ![]u8 {
-    if (compressed.len == 0 or uncompressed_size == 0) {
-        return allocator.alloc(u8, 0);
-    }
+    const out = try allocator.alloc(u8, uncompressed_size);
+    errdefer allocator.free(out);
+    if (uncompressed_size == 0) return out;
 
-    const decompressed = try allocator.alloc(u8, uncompressed_size);
-    errdefer allocator.free(decompressed);
+    const window = try allocator.alloc(u8, flate.max_window_len);
+    defer allocator.free(window);
 
-    var stream: c.mz_stream = std.mem.zeroes(c.mz_stream);
-    stream.next_in = compressed.ptr;
-    stream.avail_in = @intCast(compressed.len);
-    stream.next_out = decompressed.ptr;
-    stream.avail_out = @intCast(decompressed.len);
-
-    // Initialize inflate with raw deflate (negative window bits = no header)
-    if (c.mz_inflateInit2(&stream, -c.MZ_DEFAULT_WINDOW_BITS) != c.MZ_OK) {
-        return error.InflateInitFailed;
-    }
-    defer _ = c.mz_inflateEnd(&stream);
-
-    // Decompress
-    const result = c.mz_inflate(&stream, c.MZ_FINISH);
-    if (result != c.MZ_STREAM_END) {
-        return error.InflateFailed;
-    }
-
-    return decompressed;
+    var input: std.Io.Reader = .fixed(compressed);
+    var decompressor: flate.Decompress = .init(&input, .raw, window);
+    decompressor.reader.readSliceAll(out) catch return error.InflateFailed;
+    return out;
 }
 
-/// ZIP file writer with optional compression support
+test "deflate round trip" {
+    const gpa = std.testing.allocator;
+    const text = "PyOZ " ** 2000;
+    const packed_bytes = try deflateCompress(gpa, text);
+    defer gpa.free(packed_bytes);
+    try std.testing.expect(packed_bytes.len < text.len / 10);
+    const unpacked = try deflateDecompress(gpa, packed_bytes, text.len);
+    defer gpa.free(unpacked);
+    try std.testing.expectEqualStrings(text, unpacked);
+}
+
+/// ZIP file writer with optional compression support.
+///
+/// Output goes through a buffered `std.Io.File.Writer` (the 0.15 version issued
+/// one unbuffered write syscall per header/name/payload). Every entry also records
+/// its SHA-256 and size so the wheel builder can emit a spec-compliant RECORD.
 pub const ZipWriter = struct {
-    file: std.fs.File,
+    file: std.Io.File,
+    io: std.Io,
+    fw: std.Io.File.Writer,
+    buffer: []u8,
     allocator: std.mem.Allocator,
-    entries: std.ArrayListUnmanaged(CentralDirEntry),
+    entries: std.ArrayList(CentralDirEntry),
     bytes_written: u32,
     dos_time: u16,
     dos_date: u16,
@@ -90,25 +72,33 @@ pub const ZipWriter = struct {
 
     const Self = @This();
 
-    pub fn init(allocator: std.mem.Allocator, path: []const u8) !Self {
-        return initWithCompression(allocator, path, .deflate);
-    }
+    pub const Options = struct {
+        compression: CompressionMethod = .deflate,
+        /// Unix timestamp stamped on every entry. Callers should pass
+        /// SOURCE_DATE_EPOCH when set, for reproducible wheels.
+        mtime: ?i64 = null,
+    };
 
-    pub fn initWithCompression(allocator: std.mem.Allocator, path: []const u8, compression: CompressionMethod) !Self {
-        const file = try std.fs.cwd().createFile(path, .{});
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, path: []const u8, options: Options) !Self {
+        const file = try std.Io.Dir.cwd().createFile(io, path, .{});
+        errdefer file.close(io);
+        const buffer = try allocator.alloc(u8, 64 * 1024);
+        errdefer allocator.free(buffer);
 
-        // Get current time and convert to DOS format
-        const now = std.time.timestamp();
+        const now = options.mtime orelse std.Io.Clock.real.now(io).toSeconds();
         const dos = timestampToDos(now);
 
         return Self{
             .file = file,
+            .io = io,
+            .fw = file.writer(io, buffer),
+            .buffer = buffer,
             .allocator = allocator,
-            .entries = .{},
+            .entries = .empty,
             .bytes_written = 0,
             .dos_time = dos.time,
             .dos_date = dos.date,
-            .compression = compression,
+            .compression = options.compression,
         };
     }
 
@@ -117,7 +107,16 @@ pub const ZipWriter = struct {
             self.allocator.free(entry.filename);
         }
         self.entries.deinit(self.allocator);
-        self.file.close();
+        self.file.close(self.io);
+        self.allocator.free(self.buffer);
+    }
+
+    fn out(self: *Self) *std.Io.Writer {
+        return &self.fw.interface;
+    }
+
+    fn advance(self: *Self, n: usize) !void {
+        self.bytes_written = std.math.add(u32, self.bytes_written, std.math.cast(u32, n) orelse return error.ZipTooLarge) catch return error.ZipTooLarge;
     }
 
     /// Add a file to the ZIP archive with configured compression
@@ -156,8 +155,8 @@ pub const ZipWriter = struct {
     }
 
     fn writeEntry(self: *Self, filename: []const u8, compressed_data: []const u8, original_data: []const u8, crc: u32, method: CompressionMethod, local_header_offset: u32) !void {
-        const compressed_size: u32 = @intCast(compressed_data.len);
-        const uncompressed_size: u32 = @intCast(original_data.len);
+        const compressed_size = std.math.cast(u32, compressed_data.len) orelse return error.ZipTooLarge;
+        const uncompressed_size = std.math.cast(u32, original_data.len) orelse return error.ZipTooLarge;
 
         // Write local file header
         var header: [30]u8 = undefined;
@@ -185,13 +184,16 @@ pub const ZipWriter = struct {
         // Extra field length
         std.mem.writeInt(u16, header[28..30], 0, .little);
 
-        try self.file.writeAll(&header);
-        try self.file.writeAll(filename);
-        self.bytes_written += 30 + @as(u32, @intCast(filename.len));
+        try self.out().writeAll(&header);
+        try self.out().writeAll(filename);
+        try self.advance(30 + filename.len);
 
         // Write file data
-        try self.file.writeAll(compressed_data);
-        self.bytes_written += compressed_size;
+        try self.out().writeAll(compressed_data);
+        try self.advance(compressed_size);
+
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(original_data, &digest, .{});
 
         // Store entry for central directory
         try self.entries.append(self.allocator, .{
@@ -201,12 +203,25 @@ pub const ZipWriter = struct {
             .crc32 = crc,
             .method = method,
             .local_header_offset = local_header_offset,
+            .sha256 = digest,
         });
+    }
+
+    /// Append a wheel RECORD line (`path,sha256=<urlsafe-b64>,size`) for every
+    /// entry written so far, followed by the RECORD file's own unhashed line.
+    pub fn appendRecord(self: *const Self, list: *std.ArrayList(u8), record_path: []const u8) !void {
+        const enc = std.base64.url_safe_no_pad.Encoder;
+        for (self.entries.items) |entry| {
+            var b64: [43]u8 = undefined;
+            _ = enc.encode(&b64, &entry.sha256);
+            try list.print(self.allocator, "{s},sha256={s},{d}\n", .{ entry.filename, &b64, entry.uncompressed_size });
+        }
+        try list.print(self.allocator, "{s},,\n", .{record_path});
     }
 
     /// Add a file from disk to the ZIP archive
     pub fn addFileFromDisk(self: *Self, filename: []const u8, disk_path: []const u8) !void {
-        const data = try std.fs.cwd().readFileAlloc(self.allocator, disk_path, 100 * 1024 * 1024);
+        const data = try std.Io.Dir.cwd().readFileAlloc(self.io, disk_path, self.allocator, .limited(1024 * 1024 * 1024));
         defer self.allocator.free(data);
         try self.addFile(filename, data);
     }
@@ -255,8 +270,8 @@ pub const ZipWriter = struct {
             // Relative offset of local header
             std.mem.writeInt(u32, cd_header[42..46], entry.local_header_offset, .little);
 
-            try self.file.writeAll(&cd_header);
-            try self.file.writeAll(entry.filename);
+            try self.out().writeAll(&cd_header);
+            try self.out().writeAll(entry.filename);
 
             central_dir_size += 46 + @as(u32, @intCast(entry.filename.len));
         }
@@ -271,6 +286,7 @@ pub const ZipWriter = struct {
         // Disk where central directory starts
         std.mem.writeInt(u16, eocd[6..8], 0, .little);
         // Number of central directory records on this disk
+        if (self.entries.items.len > std.math.maxInt(u16)) return error.ZipTooLarge;
         std.mem.writeInt(u16, eocd[8..10], @intCast(self.entries.items.len), .little);
         // Total number of central directory records
         std.mem.writeInt(u16, eocd[10..12], @intCast(self.entries.items.len), .little);
@@ -281,7 +297,8 @@ pub const ZipWriter = struct {
         // Comment length
         std.mem.writeInt(u16, eocd[20..22], 0, .little);
 
-        try self.file.writeAll(&eocd);
+        try self.out().writeAll(&eocd);
+        try self.fw.interface.flush();
     }
 };
 
@@ -292,6 +309,7 @@ const CentralDirEntry = struct {
     crc32: u32,
     method: CompressionMethod,
     local_header_offset: u32,
+    sha256: [32]u8,
 };
 
 /// Convert Unix timestamp to DOS date/time format

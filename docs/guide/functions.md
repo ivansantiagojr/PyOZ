@@ -100,6 +100,25 @@ fn heavy_compute(n: i64) i64 {
 
 See [GIL Management](gil.md) for details.
 
+## Async Functions
+
+Wrap a function with `pyoz.asyncFn` to make it awaitable from asyncio; it runs
+on a `std.Io` task without the GIL and supports cancellation:
+
+```zig
+fn fetch(io: std.Io, ms: i64) !i64 {
+    try io.sleep(.fromMilliseconds(ms), .awake);
+    return ms;
+}
+.funcs = &.{ pyoz.func("fetch", pyoz.asyncFn(fetch), "Sleep, then return") },
+```
+
+```python
+await mymod.fetch(100)
+```
+
+See [Async](async.md) for parameters, cancellation and performance.
+
 ## Stub Return Type Override
 
 When a function returns `?T` only to signal errors (not to return `None` to Python), the generated stub shows `T | None` — which is misleading. Use `pyoz.Signature(T, "stub_string")` to override the stub annotation:

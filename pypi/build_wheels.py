@@ -25,12 +25,14 @@ import tarfile
 import urllib.request
 import zipfile
 
-# Map from (os, arch) to (zig target, wheel platform tag, extension)
+# Map from (os, arch) to (zig target, wheel platform tag, extension).
+# The target's libc/OS version must match the tag: Zig defaults to glibc 2.28
+# and macOS 13.0 (its minimum), so manylinux2014 (glibc 2.17) is explicit.
 TARGETS = [
-    ("x86_64-linux-gnu", "manylinux2014_x86_64", ".so"),
-    ("aarch64-linux-gnu", "manylinux2014_aarch64", ".so"),
-    ("x86_64-macos", "macosx_11_0_x86_64", ".so"),
-    ("aarch64-macos", "macosx_11_0_arm64", ".so"),
+    ("x86_64-linux-gnu.2.17", "manylinux2014_x86_64", ".so"),
+    ("aarch64-linux-gnu.2.17", "manylinux2014_aarch64", ".so"),
+    ("x86_64-macos.13.0", "macosx_13_0_x86_64", ".so"),
+    ("aarch64-macos.13.0", "macosx_13_0_arm64", ".so"),
     ("x86_64-windows", "win_amd64", ".pyd"),
     ("aarch64-windows", "win_arm64", ".pyd"),
 ]
@@ -299,10 +301,10 @@ def find_extension(ext=".so"):
 def build_wheel(extension_path, ext, platform_tag, version, dist_dir):
     """Build a single platform-specific wheel containing the native extension.
 
-    Uses abi3 (Python Stable ABI) tags: cp38-abi3-{platform}
-    This means a single wheel works for Python 3.8, 3.9, 3.10, 3.11, 3.12, 3.13+
+    Uses abi3 (Python Stable ABI) tags: cp310-abi3-{platform}
+    This means a single wheel works for Python 3.10 and every later version
     """
-    wheel_name = f"pyoz-{version}-cp38-abi3-{platform_tag}.whl"
+    wheel_name = f"pyoz-{version}-cp310-abi3-{platform_tag}.whl"
     wheel_path = os.path.join(dist_dir, wheel_name)
 
     dist_info = f"pyoz-{version}.dist-info"
@@ -342,7 +344,7 @@ Summary: Python extension modules in Zig, made easy
 Home-page: https://pyoz.dev
 Author: Daniele Linguaglossa
 License: MIT
-Requires-Python: >=3.8
+Requires-Python: >=3.10
 Classifier: Development Status :: 4 - Beta
 Classifier: Intended Audience :: Developers
 Classifier: License :: OSI Approved :: MIT License
@@ -360,7 +362,7 @@ Description-Content-Type: text/markdown
         wheel_meta = f"""Wheel-Version: 1.0
 Generator: pyoz-build
 Root-Is-Purelib: false
-Tag: cp38-abi3-{platform_tag}
+Tag: cp310-abi3-{platform_tag}
 """
         whl.writestr(f"{dist_info}/WHEEL", wheel_meta)
 
@@ -405,12 +407,12 @@ def get_current_platform_info():
         )
     elif system == "darwin":
         return (
-            f"{machine}-macos",
-            f"macosx_11_0_{'x86_64' if machine == 'x86_64' else 'arm64'}",
+            f"{machine}-macos.13.0",
+            f"macosx_13_0_{'x86_64' if machine == 'x86_64' else 'arm64'}",
             ".so",
         )
     else:
-        return f"{machine}-linux-gnu", f"manylinux2014_{machine}", ".so"
+        return f"{machine}-linux-gnu.2.17", f"manylinux2014_{machine}", ".so"
 
 
 def main():
@@ -454,7 +456,9 @@ def main():
         zig_target, platform_tag, ext = get_current_platform_info()
 
         if not args.no_build:
-            if not zig_build(release=True):
+            # Explicit target (host headers): the glibc/macOS floor must match
+            # the wheel tag, which a native build would not guarantee.
+            if not zig_build(target=zig_target, release=True):
                 sys.exit(1)
 
         extension_path = find_extension(ext)

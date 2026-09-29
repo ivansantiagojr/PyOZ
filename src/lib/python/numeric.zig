@@ -46,7 +46,7 @@ pub inline fn PyComplex_ImagAsDouble(obj: *PyObject) f64 {
 pub inline fn PyComplex_Check(obj: *PyObject) bool {
     // Reimplemented to avoid cImport issues with _PyObject_CAST_CONST
     const obj_type = Py_TYPE(obj) orelse return false;
-    const complex_type: *PyTypeObject = @ptrCast(&c.PyComplex_Type);
+    const complex_type: *PyTypeObject = types.typeObject("PyComplex_Type");
     return obj_type == complex_type or c.PyType_IsSubtype(obj_type, complex_type) != 0;
 }
 

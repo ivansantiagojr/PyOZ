@@ -1,6 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const project = @import("project.zig");
+const metadata = @import("metadata.zig");
 
 /// PyPI repository configuration
 pub const Repository = struct {
@@ -21,26 +21,25 @@ pub const Repository = struct {
 /// Upload a wheel file to PyPI using native Zig HTTP client
 pub fn uploadWheel(
     allocator: std.mem.Allocator,
+    io: std.Io,
     wheel_path: []const u8,
-    config: *const project.toml.PyProjectConfig,
     repo: Repository,
     username: []const u8,
     password: []const u8,
 ) !void {
-    const basename = std.fs.path.basename(wheel_path);
+    const basename = std.Io.Dir.path.basename(wheel_path);
     std.debug.print("Uploading {s} to {s}...\n", .{ basename, repo.name });
 
     // Read the wheel file
-    const cwd = std.fs.cwd();
-    const wheel_data = try cwd.readFileAlloc(allocator, wheel_path, 500 * 1024 * 1024);
+    const cwd = std.Io.Dir.cwd();
+    const wheel_data = try cwd.readFileAlloc(io, wheel_path, allocator, .limited(500 * 1024 * 1024));
     defer allocator.free(wheel_data);
 
     // Calculate SHA256 hash
     var hash: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(wheel_data, &hash, .{});
 
-    var hash_hex: [64]u8 = undefined;
-    _ = std.fmt.bufPrint(&hash_hex, "{x}", .{hash}) catch unreachable;
+    const hash_hex = std.fmt.bytesToHex(hash, .lower);
 
     // Extract Python version tag from wheel filename
     const pyversion = extractPythonVersion(basename) orelse "py3";
@@ -48,7 +47,7 @@ pub fn uploadWheel(
     // Build multipart form data
     const boundary = "----PyOZUploadBoundary7MA4YWxkTrZu0gW";
 
-    var body = std.ArrayListUnmanaged(u8){};
+    var body: std.ArrayList(u8) = .empty;
     defer body.deinit(allocator);
 
     // Add form fields
@@ -57,22 +56,14 @@ pub fn uploadWheel(
     try addFormField(allocator, &body, boundary, "filetype", "bdist_wheel");
     try addFormField(allocator, &body, boundary, "pyversion", pyversion);
     try addFormField(allocator, &body, boundary, "sha256_digest", &hash_hex);
-    try addFormField(allocator, &body, boundary, "metadata_version", "2.1");
-    try addFormField(allocator, &body, boundary, "name", config.name);
-    try addFormField(allocator, &body, boundary, "version", config.getVersion());
-    if (config.description.len > 0) {
-        try addFormField(allocator, &body, boundary, "summary", config.description);
-    }
-    try addFormField(allocator, &body, boundary, "requires_python", config.getPythonRequires());
 
-    // Try to read README.md for the long description
-    const readme_content: ?[]const u8 = cwd.readFileAlloc(allocator, "README.md", 1024 * 1024) catch null;
-    defer if (readme_content) |rc| allocator.free(rc);
-
-    if (readme_content) |readme| {
-        try addFormField(allocator, &body, boundary, "description", readme);
-        try addFormField(allocator, &body, boundary, "description_content_type", "text/markdown");
-    }
+    // The same core metadata the wheel's METADATA holds (classifiers,
+    // license, URLs, dependencies, readme, ...), as upload form fields.
+    var md = try metadata.build(allocator, io, cwd);
+    defer md.deinit(allocator);
+    const fields = try metadata.formFields(allocator, md.text);
+    defer allocator.free(fields);
+    for (fields) |f| try addFormField(allocator, &body, boundary, f.name, f.value);
 
     // Add the wheel file
     try addFormFile(allocator, &body, boundary, "content", basename, wheel_data);
@@ -96,8 +87,12 @@ pub fn uploadWheel(
     defer allocator.free(content_type);
 
     // Make HTTP request
-    var client = std.http.Client{ .allocator = allocator };
+    var client: std.http.Client = .{ .allocator = allocator, .io = io };
     defer client.deinit();
+
+    // Capture the response body: PyPI explains *why* an upload was rejected there.
+    var response: std.Io.Writer.Allocating = .init(allocator);
+    defer response.deinit();
 
     const result = client.fetch(.{
         .location = .{ .url = repo.url },
@@ -107,6 +102,7 @@ pub fn uploadWheel(
             .authorization = .{ .override = auth_header },
         },
         .payload = body.items,
+        .response_writer = &response.writer,
     }) catch |err| {
         std.debug.print("HTTP request failed: {s}\n", .{@errorName(err)});
         return error.NetworkError;
@@ -118,9 +114,17 @@ pub fn uploadWheel(
     if (status_code >= 200 and status_code < 300) {
         std.debug.print("Upload successful!\n", .{});
     } else if (status_code == 400) {
-        std.debug.print("Upload failed: Bad request\n", .{});
-        std.debug.print("This usually means the version already exists on {s}.\n", .{repo.name});
-        std.debug.print("Try incrementing the version in pyproject.toml.\n", .{});
+        // PyPI says why in the response; add a hint for the common cases
+        const msg = response.written();
+        std.debug.print("Upload failed: {s} rejected the wheel (HTTP 400)\n", .{repo.name});
+        printServerMessage(msg);
+        if (containsIgnoreCase(msg, "already exists")) {
+            std.debug.print("Hint: this version was already uploaded; bump the version in pyproject.toml.\n", .{});
+        } else if (containsIgnoreCase(msg, "platform tag")) {
+            std.debug.print("Hint: PyPI only accepts portable (manylinux) Linux wheels; rebuild without --native or linux-platform-tag = \"linux_*\".\n", .{});
+        } else if (containsIgnoreCase(msg, "classifier")) {
+            std.debug.print("Hint: check the classifiers in pyproject.toml against https://pypi.org/classifiers/\n", .{});
+        }
         return error.BadRequest;
     } else if (status_code == 401 or status_code == 403) {
         std.debug.print("Upload failed: Authentication failed (HTTP {d})\n", .{status_code});
@@ -128,8 +132,19 @@ pub fn uploadWheel(
         return error.AuthFailed;
     } else {
         std.debug.print("Upload failed with HTTP status {d}\n", .{status_code});
+        printServerMessage(response.written());
         return error.UploadFailed;
     }
+}
+
+fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+    return std.ascii.indexOfIgnoreCase(haystack, needle) != null;
+}
+
+fn printServerMessage(body: []const u8) void {
+    const trimmed = std.mem.trim(u8, body, &std.ascii.whitespace);
+    if (trimmed.len == 0) return;
+    std.debug.print("Server response: {s}\n", .{trimmed[0..@min(trimmed.len, 2048)]});
 }
 
 fn extractPythonVersion(wheel_filename: []const u8) ?[]const u8 {
@@ -140,7 +155,7 @@ fn extractPythonVersion(wheel_filename: []const u8) ?[]const u8 {
     return parts.next(); // python tag
 }
 
-fn addFormField(allocator: std.mem.Allocator, body: *std.ArrayListUnmanaged(u8), boundary: []const u8, name: []const u8, value: []const u8) !void {
+fn addFormField(allocator: std.mem.Allocator, body: *std.ArrayList(u8), boundary: []const u8, name: []const u8, value: []const u8) !void {
     try body.appendSlice(allocator, "--");
     try body.appendSlice(allocator, boundary);
     try body.appendSlice(allocator, "\r\n");
@@ -151,7 +166,7 @@ fn addFormField(allocator: std.mem.Allocator, body: *std.ArrayListUnmanaged(u8),
     try body.appendSlice(allocator, "\r\n");
 }
 
-fn addFormFile(allocator: std.mem.Allocator, body: *std.ArrayListUnmanaged(u8), boundary: []const u8, name: []const u8, filename: []const u8, data: []const u8) !void {
+fn addFormFile(allocator: std.mem.Allocator, body: *std.ArrayList(u8), boundary: []const u8, name: []const u8, filename: []const u8, data: []const u8) !void {
     try body.appendSlice(allocator, "--");
     try body.appendSlice(allocator, boundary);
     try body.appendSlice(allocator, "\r\n");
@@ -173,28 +188,18 @@ fn base64Encode(allocator: std.mem.Allocator, input: []const u8) ![]const u8 {
     return buf;
 }
 
-/// Get API token from environment or show instructions
-pub fn getCredentials(allocator: std.mem.Allocator, repo: Repository) !struct { username: []const u8, password: []const u8 } {
-    // Try environment variables first
-    const env_token = std.process.getEnvVarOwned(allocator, "PYPI_TOKEN") catch |err| blk: {
-        if (err == error.EnvironmentVariableNotFound) break :blk null;
-        return err;
-    };
+/// Get API token from environment or show instructions.
+/// For TestPyPI, TEST_PYPI_TOKEN takes precedence so a production token is never
+/// sent to the test server when both are set.
+pub fn getCredentials(allocator: std.mem.Allocator, environ: *const std.process.Environ.Map, repo: Repository) !struct { username: []const u8, password: []const u8 } {
+    const is_test = std.mem.eql(u8, repo.name, "TestPyPI");
+    const token: ?[]const u8 = if (is_test)
+        environ.get("TEST_PYPI_TOKEN") orelse environ.get("PYPI_TOKEN")
+    else
+        environ.get("PYPI_TOKEN");
 
-    if (env_token) |token| {
-        return .{ .username = try allocator.dupe(u8, "__token__"), .password = token };
-    }
-
-    // Try TestPyPI specific env var
-    if (std.mem.eql(u8, repo.name, "TestPyPI")) {
-        const test_token = std.process.getEnvVarOwned(allocator, "TEST_PYPI_TOKEN") catch |err| blk: {
-            if (err == error.EnvironmentVariableNotFound) break :blk null;
-            return err;
-        };
-
-        if (test_token) |token| {
-            return .{ .username = try allocator.dupe(u8, "__token__"), .password = token };
-        }
+    if (token) |t| {
+        return .{ .username = try allocator.dupe(u8, "__token__"), .password = try allocator.dupe(u8, t) };
     }
 
     // No token found - provide instructions

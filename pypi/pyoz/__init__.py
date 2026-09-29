@@ -5,6 +5,7 @@ import sys
 
 from ._pyoz import (
     build,
+    cli_build,
     develop,
     init,
     publish,
@@ -93,35 +94,10 @@ Options:
 
 
 def _cmd_build(args):
-    release = False
-    stubs = True
-
-    for arg in args:
-        if arg in ("-h", "--help"):
-            print("""Usage: pyoz build [options]
-
-Build the extension module and create a wheel package.
-
-Options:
-  -d, --debug    Build in debug mode (default)
-  -r, --release  Build in release mode (optimized)
-  --stubs        Generate .pyi type stub file (default)
-  --no-stubs     Do not generate .pyi type stub file
-  -h, --help     Show this help message""")
-            return
-        elif arg in ("-r", "--release"):
-            release = True
-        elif arg in ("-d", "--debug"):
-            release = False
-        elif arg == "--no-stubs":
-            stubs = False
-        elif arg == "--stubs":
-            stubs = True
-
-    _check_zig()
-    wheel_path = build(release, stubs)
-    print(f"Wheel: {wheel_path}")
-
+    # Same options as the native CLI (--release, --target, --python, --native, ...)
+    if not any(a in ("-h", "--help") for a in args):
+        _check_zig()
+    cli_build(list(args))
 
 def _cmd_develop(args):
     for arg in args:
@@ -212,6 +188,16 @@ def main():
     cmd = args[0]
     cmd_args = args[1:]
 
+    try:
+        _dispatch(cmd, cmd_args)
+    except RuntimeError as e:
+        # The native CLI already printed what went wrong; the exception only
+        # carries the Zig error name, so exit without a traceback.
+        print(f"pyoz {cmd} failed ({e})", file=sys.stderr)
+        sys.exit(1)
+
+
+def _dispatch(cmd, cmd_args):
     if cmd == "init":
         _cmd_init(cmd_args)
     elif cmd == "build":

@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const py = @import("../python.zig");
+const ft = @import("threading.zig");
 const conversion = @import("../conversion.zig");
 const ref_mod = @import("../ref.zig");
 
@@ -160,8 +161,8 @@ pub fn PropertiesBuilder(comptime T: type, comptime Parent: type, comptime class
 
                 gs[field_idx] = .{
                     .name = @ptrCast(field.name.ptr),
-                    .get = @ptrCast(generateGetter(field.name, field.type)),
-                    .set = if (isFrozen()) null else @ptrCast(generateSetter(field.name, field.type)),
+                    .get = @ptrCast(ft.locked(T, generateGetter(field.name, field.type))),
+                    .set = if (isFrozen()) null else @ptrCast(ft.locked(T, generateSetter(field.name, field.type))),
                     .doc = getPropertyDoc(field.name),
                     .closure = null,
                 };
@@ -186,8 +187,8 @@ pub fn PropertiesBuilder(comptime T: type, comptime Parent: type, comptime class
                     if (!is_field) {
                         gs[comp_idx] = .{
                             .name = @ptrCast(prop_name.ptr),
-                            .get = @ptrCast(generateComputedGetter(prop_name)),
-                            .set = if (isFrozen()) null else @ptrCast(generateComputedSetter(prop_name)),
+                            .get = @ptrCast(ft.locked(T, generateComputedGetter(prop_name))),
+                            .set = if (isFrozen()) null else @ptrCast(ft.locked(T, generateComputedSetter(prop_name))),
                             .doc = getPropertyDoc(prop_name),
                             .closure = null,
                         };
@@ -201,8 +202,8 @@ pub fn PropertiesBuilder(comptime T: type, comptime Parent: type, comptime class
                 if (isPyozPropertyDecl(T, decl.name)) {
                     gs[comp_idx] = .{
                         .name = @ptrCast(decl.name.ptr),
-                        .get = @ptrCast(generatePyozPropertyGetter(decl.name)),
-                        .set = if (isFrozen()) null else @ptrCast(generatePyozPropertySetter(decl.name)),
+                        .get = @ptrCast(ft.locked(T, generatePyozPropertyGetter(decl.name))),
+                        .set = if (isFrozen()) null else @ptrCast(ft.locked(T, generatePyozPropertySetter(decl.name))),
                         .doc = getPyozPropertyDoc(decl.name),
                         .closure = null,
                     };

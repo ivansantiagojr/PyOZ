@@ -161,6 +161,19 @@ fn bad(obj: *pyoz.PyObject) void {
 }
 ```
 
+## Free-Threaded Python
+
+On free-threaded CPython (3.13t/3.14t) with a module that declares
+`.gil_used = false`, there is no GIL: other threads already run in parallel.
+`pyoz.releaseGIL()` remains valid and cheap, and still matters for one reason:
+it detaches the thread state, which **suspends the per-object lock** PyOZ holds
+while a class method runs. Only release around work that does not touch `self`,
+or copy what you need first (see "Extract Data Before Releasing" above). See
+[Free-Threading](free-threading.md).
+
+For work you want to `await` from asyncio instead of blocking a thread, see
+[Async](async.md).
+
 ## Next Steps
 
 - [NumPy](numpy.md) - NumPy array integration

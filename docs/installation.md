@@ -14,11 +14,12 @@ Alternatively, download a binary from [GitHub Releases](https://github.com/pyozi
 
 ## Requirements
 
-- **Zig** 0.15.0 or later
-- **Python** 3.8 or later (with development headers)
+- **Zig** 0.16.0 (any 0.16.x release). Zig changes incompatibly between minor
+  releases, so newer versions such as 0.17 do not work with PyOZ 0.13.
+- **Python** 3.10 or later (with development headers)
 
 !!! note "Python Version Support"
-    PyOZ supports Python 3.8 through 3.13. Testing is performed on Python 3.9 - 3.13.
+    PyOZ supports Python 3.10 through 3.14, including the free-threaded 3.14t build. All of them are tested in CI.
 
 ## Installing Zig
 
@@ -26,16 +27,17 @@ Alternatively, download a binary from [GitHub Releases](https://github.com/pyozi
 
 ```bash
 # Download from ziglang.org
-wget https://ziglang.org/download/0.15.0/zig-linux-x86_64-0.15.0.tar.xz
-tar xf zig-linux-x86_64-0.15.0.tar.xz
-export PATH=$PATH:$(pwd)/zig-linux-x86_64-0.15.0
+wget https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz
+tar xf zig-x86_64-linux-0.16.0.tar.xz
+export PATH=$PATH:$(pwd)/zig-x86_64-linux-0.16.0
 ```
 
 Or use your package manager:
 
 ```bash
-# Ubuntu/Debian (may have older version)
-sudo apt install zig
+# Check the version: distribution packages often lag behind
+sudo apt install zig   # Ubuntu/Debian
+zig version            # must print 0.16.x
 
 # Arch Linux
 sudo pacman -S zig
@@ -44,7 +46,7 @@ sudo pacman -S zig
 ### macOS
 
 ```bash
-# Homebrew
+# Homebrew (check that `zig version` prints 0.16.x)
 brew install zig
 
 # Or download from ziglang.org
@@ -53,6 +55,12 @@ brew install zig
 ### Windows
 
 Download from [ziglang.org](https://ziglang.org/download/) and add to PATH.
+
+!!! note "Installing PyOZ-based packages from source"
+    People who `pip install` a PyOZ project from source (an sdist or a git URL)
+    don't need Zig: when no Zig 0.16 is on `PATH`, the `pyoz.backend` build
+    backend installs the [`ziglang`](https://pypi.org/project/ziglang/) package
+    into pip's build environment and uses its compiler.
 
 ## Installing Python Development Headers
 

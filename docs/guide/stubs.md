@@ -174,6 +174,18 @@ When using the [`.from` auto-scan API](from.md), all auto-detected declarations 
 
 When using [`pyoz.withSource()`](from.md#source-introspection-with-withsource), stubs automatically use real Zig parameter names (e.g. `def fibonacci(n: int)` instead of `def fibonacci(arg0: int)`) and include `///` doc comments as docstrings. Without `withSource`, docstrings come from the `name__doc__` convention and parameters default to `arg0`, `arg1`, etc.
 
+For functions registered with `pyoz.func`, `.withParams` names the parameters in both the stub and `help()`:
+
+```zig
+pyoz.func("s10_enc", s10_enc, "Encrypt a 64-bit word").withParams("xword, yword, key"),
+```
+
+```python
+def s10_enc(xword: int, yword: int, key: list[int] | tuple[int, ...]) -> tuple[int, int]: ...
+```
+
+(Fixed-size array parameters such as `[4]u32` accept a list or a tuple; Zig tuple return types such as `struct { u32, u32 }` become Python tuples.)
+
 No special configuration is needed — stub generation works the same whether you use explicit registration or `.from`.
 
 ## Limitations

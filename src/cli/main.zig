@@ -3,13 +3,11 @@ const version = @import("version");
 
 const commands = @import("commands.zig");
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const ctx: commands.Ctx = .{ .gpa = allocator, .io = init.io, .environ = init.environ_map };
 
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
 
     if (args.len < 2) {
         printUsage();
@@ -30,17 +28,17 @@ pub fn main() !void {
 
     // Dispatch to command handlers
     if (std.mem.eql(u8, command, "init")) {
-        try commands.init(allocator, args[2..]);
+        try commands.init(ctx, args[2..]);
     } else if (std.mem.eql(u8, command, "build")) {
-        try commands.build(allocator, args[2..]);
+        try commands.build(ctx, args[2..]);
     } else if (std.mem.eql(u8, command, "develop")) {
-        try commands.develop(allocator, args[2..]);
+        try commands.develop(ctx, args[2..]);
     } else if (std.mem.eql(u8, command, "publish")) {
-        try commands.publish(allocator, args[2..]);
+        try commands.publish(ctx, args[2..]);
     } else if (std.mem.eql(u8, command, "test")) {
-        try commands.runTests(allocator, args[2..]);
+        try commands.runTests(ctx, args[2..]);
     } else if (std.mem.eql(u8, command, "bench")) {
-        try commands.runBench(allocator, args[2..]);
+        try commands.runBench(ctx, args[2..]);
     } else {
         std.debug.print("Unknown command: {s}\n\n", .{command});
         printUsage();
@@ -73,4 +71,17 @@ fn printUsage() void {
         \\Run 'pyoz <command> --help' for more information on a command.
         \\
     , .{version.string});
+}
+
+test {
+    _ = @import("builder.zig");
+    _ = @import("binfo.zig");
+    _ = @import("target.zig");
+    _ = @import("pyheaders.zig");
+    _ = @import("toml.zig");
+    _ = @import("metadata.zig");
+    _ = @import("zip.zig");
+    _ = @import("wheel.zig");
+    _ = @import("project.zig");
+    _ = @import("sys.zig");
 }

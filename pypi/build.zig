@@ -22,7 +22,7 @@ fn detectPython(b: *std.Build) ?PythonConfig {
     const version_result = b.runAllowFail(
         &.{ python_cmd, "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" },
         &out_code,
-        .Inherit,
+        .inherit,
     ) catch return null;
     if (out_code != 0) return null;
     const version = std.mem.trim(u8, version_result, &std.ascii.whitespace);
@@ -37,7 +37,7 @@ fn detectPython(b: *std.Build) ?PythonConfig {
     const include_result = b.runAllowFail(
         &.{ python_cmd, "-c", "import sysconfig; print(sysconfig.get_path('include'))" },
         &out_code,
-        .Inherit,
+        .inherit,
     ) catch return null;
     if (out_code != 0) return null;
     const include_dir = std.mem.trim(u8, include_result, &std.ascii.whitespace);
@@ -48,7 +48,7 @@ fn detectPython(b: *std.Build) ?PythonConfig {
         python_cmd,
         "-c",
         "import sysconfig,sys,os;d=sysconfig.get_config_var('LIBDIR');print(d if d else os.path.join(sys.prefix,'libs' if sys.platform=='win32' else 'lib'))",
-    }, &out_code, .Inherit)) |libdir_result| {
+    }, &out_code, .inherit)) |libdir_result| {
         if (out_code == 0) {
             const libdir_trimmed = std.mem.trim(u8, libdir_result, &std.ascii.whitespace);
             if (libdir_trimmed.len > 0) {
@@ -102,7 +102,7 @@ pub fn build(b: *std.Build) void {
         null;
 
     // Get the PyOZ dependency (points to ../)
-    // Enable abi3 (Python Stable ABI) so the extension is compatible with Python 3.8+
+    // Enable abi3 (Python Stable ABI) so the extension is compatible with Python 3.10+
     // and can be cross-compiled without target-specific Python libraries.
     const pyoz_dep = b.dependency("PyOZ", .{
         .target = target,
@@ -122,19 +122,8 @@ pub fn build(b: *std.Build) void {
     const cli_path: std.Build.LazyPath = b.path("../src/cli");
     const wf = b.addWriteFiles();
     _ = wf.addCopyFile(b.path("src/lib.zig"), "lib.zig");
-    const cli_files = [_][]const u8{
-        "builder.zig",
-        "commands.zig",
-        "project.zig",
-        "pypi.zig",
-        "symreader.zig",
-        "toml.zig",
-        "wheel.zig",
-        "zip.zig",
-    };
-    for (cli_files) |name| {
-        _ = wf.addCopyFile(cli_path.path(b, name), name);
-    }
+    // Copy every CLI source file (a hard-coded list silently broke when files were added)
+    _ = wf.addCopyDirectory(cli_path, "", .{ .include_extensions = &.{".zig"} });
 
     // Create the user lib module (lib.zig + CLI files)
     const user_lib_mod = b.createModule(.{
@@ -154,14 +143,6 @@ pub fn build(b: *std.Build) void {
         .root_module = user_lib_mod,
     });
 
-    // Add miniz C source (needed by zip.zig which is imported by wheel.zig)
-    lib.addCSourceFile(.{
-        .file = b.path("../src/miniz/miniz.c"),
-        .flags = &.{"-DMINIZ_NO_STDIO"},
-    });
-    lib.addIncludePath(b.path("../src/miniz"));
-    user_lib_mod.addIncludePath(b.path("../src/miniz"));
-
     // Link Python headers (needed for compilation).
     // On Linux/macOS, do NOT link against libpython — the symbols are provided
     // by the Python interpreter at runtime. Linking against a specific version
@@ -171,7 +152,7 @@ pub fn build(b: *std.Build) void {
     if (python_headers_dir) |headers_dir| {
         // Cross-compilation: use downloaded CPython headers.
         // build_wheels.py stages the correct pyconfig.h into this directory.
-        lib.addIncludePath(.{ .cwd_relative = headers_dir });
+        lib.root_module.addIncludePath(.{ .cwd_relative = headers_dir });
         user_lib_mod.addIncludePath(.{ .cwd_relative = headers_dir });
 
         if (target_os == .windows) {
@@ -192,18 +173,18 @@ pub fn build(b: *std.Build) void {
                     else => "i386:x86-64",
                 },
             });
-            lib.addObjectFile(python3_lib);
+            lib.root_module.addObjectFile(python3_lib);
         }
     } else if (python_config) |python| {
         // Native build: use host Python's headers
-        lib.addIncludePath(.{ .cwd_relative = python.include_dir });
+        lib.root_module.addIncludePath(.{ .cwd_relative = python.include_dir });
         user_lib_mod.addIncludePath(.{ .cwd_relative = python.include_dir });
         if (target_os == .windows) {
             if (python.lib_dir) |lib_dir| {
-                lib.addLibraryPath(.{ .cwd_relative = lib_dir });
+                lib.root_module.addLibraryPath(.{ .cwd_relative = lib_dir });
             }
             // Link against python3.dll (stable ABI), not python3XX.dll
-            lib.linkSystemLibrary("python3");
+            lib.root_module.linkSystemLibrary("python3", .{});
         }
     }
 
@@ -214,7 +195,7 @@ pub fn build(b: *std.Build) void {
         lib.linker_allow_shlib_undefined = true;
     }
 
-    lib.linkLibC();
+    lib.root_module.link_libc = true;
 
     // Install as .so (Unix) or .pyd (Windows)
     const dest_name = if (target_os == .windows) "_pyoz.pyd" else "_pyoz.so";

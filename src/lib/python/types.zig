@@ -4,21 +4,29 @@
 //! When ABI3 mode is enabled, defines Py_LIMITED_API to restrict to Stable ABI.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const build_options = @import("build_options");
 
-// ABI3 configuration - hardcoded to Python 3.8 minimum
+// ABI3 configuration - Python 3.10 minimum (single source of truth; see abi.zig)
 pub const abi3_enabled = build_options.abi3;
-pub const abi3_version = "3.8";
-pub const abi3_version_hex = 0x03080000;
+pub const abi3_version = "3.10";
+pub const abi3_version_hex = 0x030A0000;
 
 // Import Python C API from system headers
 // In ABI3 mode, we define Py_LIMITED_API and exclude non-stable headers
 pub const c = @cImport({
     @cDefine("PY_SSIZE_T_CLEAN", "1");
 
-    // Define Py_LIMITED_API for Python 3.8 minimum
+    // Zig 0.16's C translator mistranslates MinGW's _FORTIFY_SOURCE inline
+    // wrappers (wcscat/wcscpy declare an unused local), which breaks
+    // ReleaseSafe builds for Windows. PyOZ never calls those wrappers.
+    if (builtin.os.tag == .windows) {
+        @cUndef("_FORTIFY_SOURCE");
+    }
+
+    // Define Py_LIMITED_API for Python 3.10 minimum
     if (abi3_enabled) {
-        @cDefine("Py_LIMITED_API", "0x03080000");
+        @cDefine("Py_LIMITED_API", "0x030A0000");
     }
 
     @cInclude("Python.h");
@@ -37,6 +45,16 @@ pub const c = @cImport({
 pub const PyObject = c.PyObject;
 pub const Py_ssize_t = c.Py_ssize_t;
 pub const PyTypeObject = c.PyTypeObject;
+
+/// Address of a built-in CPython type object (e.g. `typeObject("PyLong_Type")`).
+///
+/// Uses `@extern` instead of `&c.PyLong_Type`: under Py_LIMITED_API,
+/// PyTypeObject is opaque and Zig 0.16's C translator refuses extern variables
+/// of opaque type (it emits `@compileError`). `@extern` only needs a pointer
+/// type, so this works identically in full and ABI3 modes.
+pub inline fn typeObject(comptime name: []const u8) *PyTypeObject {
+    return @extern(*PyTypeObject, .{ .name = name });
+}
 
 // Method definition
 pub const PyMethodDef = c.PyMethodDef;
@@ -60,20 +78,36 @@ pub const PyModuleDef_Base = c.PyModuleDef_Base;
 // We detect this at comptime and handle both cases
 pub const has_direct_ob_refcnt = @hasField(c.PyObject, "ob_refcnt");
 
+/// True when compiling against a free-threaded (PEP 703, "3.13t"/"3.14t") CPython.
+/// The object header layout differs: ob_tid / ob_ref_local / ob_ref_shared.
+pub const gil_disabled = @hasDecl(c, "Py_GIL_DISABLED");
+
+/// Initialize the header of a *statically allocated* PyObject the way
+/// `PyObject_HEAD_INIT` does, for every CPython layout PyOZ supports.
+/// (Writing `1` into the first word is only correct for GIL builds: on
+/// free-threaded builds the first word is `ob_tid`.)
+pub fn initStaticHeader(ob: *c.PyObject) void {
+    if (comptime gil_disabled) {
+        ob.ob_tid = 0;
+        ob.ob_flags = if (@hasDecl(c, "_Py_STATICALLY_ALLOCATED_FLAG")) c._Py_STATICALLY_ALLOCATED_FLAG else 0;
+        ob.ob_ref_local = std.math.maxInt(u32); // _Py_IMMORTAL_REFCNT_LOCAL
+        ob.ob_ref_shared = 0;
+    } else if (comptime has_direct_ob_refcnt) {
+        ob.ob_refcnt = 1;
+    } else {
+        // Python 3.12+: ob_refcnt is inside an anonymous union at offset 0
+        const ob_ptr: *Py_ssize_t = @ptrCast(ob);
+        ob_ptr.* = 1;
+    }
+    ob.ob_type = null;
+}
+
 pub const PyModuleDef_HEAD_INIT: PyModuleDef_Base = blk: {
     var base: PyModuleDef_Base = std.mem.zeroes(PyModuleDef_Base);
     base.m_init = null;
     base.m_index = 0;
     base.m_copy = null;
-    // Set ob_refcnt based on Python version struct layout
-    if (has_direct_ob_refcnt) {
-        base.ob_base.ob_refcnt = 1;
-    } else {
-        // Python 3.12+: ob_refcnt is inside anonymous union, access via pointer
-        const ob_ptr: *Py_ssize_t = @ptrCast(&base.ob_base);
-        ob_ptr.* = 1;
-    }
-    base.ob_base.ob_type = null;
+    initStaticHeader(&base.ob_base);
     break :blk base;
 };
 
