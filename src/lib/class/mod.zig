@@ -1029,6 +1029,18 @@ fn generateClass(comptime name: [*:0]const u8, comptime T: type, comptime class_
             }
         }
 
+        /// Create a Python instance holding `value`, for Zig functions that
+        /// return a class by value. Goes through tp_new like `Cls()` does, so
+        /// the freelist is used, __dict__/__weakref__ slots are zeroed, and the
+        /// object is marked initialized (which is what lets __del__ run).
+        pub fn newInstance(value: T) ?*py.PyObject {
+            const obj = lifecycle.py_new(getType(), null, null) orelse return null;
+            const self: *PyWrapper = @ptrCast(@alignCast(obj));
+            self.getData().* = value;
+            self.setInitialized(true);
+            return obj;
+        }
+
         // ====================================================================
         // Helper to extract Zig data from a Python object
         // ====================================================================

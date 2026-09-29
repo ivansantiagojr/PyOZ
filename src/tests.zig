@@ -3387,6 +3387,20 @@ test "FailingResource - successful creation calls __del__ on delete" {
     try std.testing.expect(try python.eval(bool, "failing_resource_del_ok"));
 }
 
+test "class returned by value from a function runs __del__" {
+    const python = try initTestPython();
+
+    try python.exec(
+        \\before = example.del_counter_deleted_count()
+        \\for i in range(1000):
+        \\    c = example.make_del_counter(i)
+        \\    assert c.value == i
+        \\    del c
+        \\returned_value_del_ran = example.del_counter_deleted_count() == before + 1000
+    );
+    try std.testing.expect(try python.eval(bool, "returned_value_del_ran"));
+}
+
 test "FailingResource - failed __new__ does not call __del__" {
     const python = try initTestPython();
 

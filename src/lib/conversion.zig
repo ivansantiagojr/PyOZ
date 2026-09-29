@@ -318,11 +318,7 @@ pub fn Converter(comptime class_infos: []const class_mod.ClassInfo) type {
                     inline for (class_infos) |cls_info| {
                         if (T == cls_info.zig_type) {
                             const Wrapper = class_mod.getWrapperWithName(cls_info.name, cls_info.zig_type, class_infos);
-                            // Allocate a new Python object - use getType() which works in both ABI3 and non-ABI3 modes
-                            const py_obj = py.PyObject_New(Wrapper.PyWrapper, Wrapper.getType()) orelse return null;
-                            // Copy the data
-                            py_obj.getData().* = value;
-                            return @ptrCast(py_obj);
+                            return Wrapper.newInstance(value);
                         }
                     }
 

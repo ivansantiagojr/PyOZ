@@ -604,7 +604,7 @@ const build_zig_template =
     \\        user_lib_mod.addLibraryPath(.{ .cwd_relative = lib_dir });
     \\    }
     \\    if (b.option([]const u8, "python-lib-name", "Python library name")) |lib_name| {
-    \\        user_lib_mod.linkSystemLibrary(lib_name, .{});
+    \\        user_lib_mod.linkSystemLibrary(lib_name, .{ .use_pkg_config = .no });
     \\    }
     \\
     \\    // Extension depends on the *target* OS (.pyd for Windows, .so otherwise),
@@ -678,7 +678,7 @@ const build_zig_package_template =
     \\        user_lib_mod.addLibraryPath(.{ .cwd_relative = lib_dir });
     \\    }
     \\    if (b.option([]const u8, "python-lib-name", "Python library name")) |lib_name| {
-    \\        user_lib_mod.linkSystemLibrary(lib_name, .{});
+    \\        user_lib_mod.linkSystemLibrary(lib_name, .{ .use_pkg_config = .no });
     \\    }
     \\
     \\    // Extension depends on the *target* OS (.pyd for Windows, .so otherwise),

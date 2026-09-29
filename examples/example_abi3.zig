@@ -722,6 +722,29 @@ const FailingResource = struct {
 };
 
 // ============================================================================
+// DelCounter - __del__ must run for instances a Zig function returns by value
+// (not only for instances created by calling the class)
+// Atomic: __del__ can run on any thread in a free-threaded build
+var del_counter_deleted = std.atomic.Value(i64).init(0);
+
+const DelCounter = struct {
+    value: i64,
+
+    pub fn __del__(self: *DelCounter) void {
+        _ = self;
+        _ = del_counter_deleted.fetchAdd(1, .monotonic);
+    }
+};
+
+fn make_del_counter(value: i64) DelCounter {
+    return .{ .value = value };
+}
+
+fn del_counter_deleted_count() i64 {
+    return del_counter_deleted.load(.monotonic);
+}
+
+// ============================================================================
 // LazyIterator example (generator-like)
 // ============================================================================
 
@@ -1790,6 +1813,8 @@ pub const Abi3Example = pyoz.module(.{
     .name = "example_abi3",
     .doc = "ABI3-compatible example module demonstrating Stable ABI features",
     .funcs = &.{
+        pyoz.func("make_del_counter", make_del_counter, "Return a DelCounter by value"),
+        pyoz.func("del_counter_deleted_count", del_counter_deleted_count, "How many DelCounter instances were deleted"),
         // Basic arithmetic
         pyoz.func("async_add", pyoz.asyncFn(async_add), "await: a+b (ABI3)"),
         pyoz.func("add", add, "Add two integers"),
@@ -1911,6 +1936,7 @@ pub const Abi3Example = pyoz.module(.{
         pyoz.class("Adder", Adder),
         pyoz.class("IntList", IntList),
         pyoz.class("FailingResource", FailingResource),
+        pyoz.class("DelCounter", DelCounter),
         pyoz.class("BitSet", BitSet),
         pyoz.class("PowerNumber", PowerNumber),
         // New classes for ABI3 testing
