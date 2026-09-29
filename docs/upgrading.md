@@ -29,7 +29,7 @@ Point the dependency at the latest 0.13 release and refresh its hash with `zig f
 which rewrites `build.zig.zon` for you:
 
 ```bash
-zig fetch --save=PyOZ https://github.com/pyozig/PyOZ/archive/refs/tags/v0.13.2.tar.gz
+zig fetch --save=PyOZ https://github.com/pyozig/PyOZ/archive/refs/tags/v0.13.3.tar.gz
 ```
 
 Then declare the minimum Zig version, so older compilers fail with a clear
@@ -212,6 +212,18 @@ The tuple type lists the argument types in order. If you need a
   entry points from `[project]` now reach the wheel and PyPI; 0.12 dropped
   everything but the name, version, summary and `README.md`. Dependencies
   declared in `pyproject.toml` are now installed with the wheel.
+- **`abi3 = true` now builds a real Stable ABI module.** Before 0.13.3 it only
+  set the wheel tag: the module was built for the Python that ran `pyoz build`,
+  so an `abi3` wheel could crash on other versions. `pyoz build` fixes this for
+  existing projects without edits; rebuild and republish any `abi3` wheels made
+  with an earlier PyOZ. To use `zig build -Dabi3=true` directly, add the option
+  to `build.zig` and pass it to the dependency:
+
+    ```zig
+    const abi3 = b.option(bool, "abi3", "Build for the Python Stable ABI (abi3)") orelse false;
+    const pyoz_dep = b.dependency("PyOZ", .{ .target = target, .optimize = optimize, .abi3 = abi3 });
+    ```
+
 - **Windows non-ABI3 builds link `python3XY.lib`** instead of `python3.lib`,
   which only exports the Stable ABI.
 - **Fixed-size array parameters** (`[3]i64`) accept a tuple as well as a list.

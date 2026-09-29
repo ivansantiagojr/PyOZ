@@ -5,6 +5,12 @@ All notable changes to PyOZ will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.3] - 2026-09-29
+
+### Fixed
+- **`abi3 = true` did not build a Stable ABI extension.** `pyoz build` only used it for the wheel tag: the module was compiled against the full C API of the building Python and tagged `cp310-abi3`, so pip would install it on other Python versions, where it can crash. `pyoz build` now enables abi3 in PyOZ's build through the environment (`PYOZ_ABI3`), which works with existing projects unchanged; new `build.zig` templates also accept `zig build -Dabi3=true`. **Wheels published as `abi3` with an earlier PyOZ should be rebuilt and republished.** CI now checks that an abi3 build uses `PyType_FromSpec`, not `PyType_Ready`.
+- **ABI3 builds leaked every `str` argument.** Converting a `str` to `[]const u8` encoded it to a bytes object that was never freed (about 62 MB per 100,000 calls with a 600-character string). `PyUnicode_AsUTF8AndSize` is in the Limited API since Python 3.10, PyOZ's minimum, so both modes now use it directly. This affected parameters, dict keys, `pyoz.Args` fields, `Path`, `Decimal` and attribute names. Regression tests in both modes.
+
 ## [0.13.2] - 2026-09-29
 
 ### Fixed

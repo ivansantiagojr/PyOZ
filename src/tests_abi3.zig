@@ -1794,6 +1794,23 @@ test "ABI3 - async protocols via PyType_FromSpec slots" {
     try std.testing.expectEqualStrings("([2, 1, 0], 'end', 9, (True, 5), -1)", try python.eval([]const u8, "_abi3_proto"));
 }
 
+test "ABI3 - str arguments do not leak" {
+    const python = try initTestPython();
+    // Each call converts a str to []const u8. ABI3 builds used to encode it to
+    // a bytes object that was never freed: one leaked object per call.
+    try python.exec(
+        \\import sys
+        \\_s = 'x' * 600
+        \\for _ in range(1000): example_abi3.string_length(_s)
+        \\_before = sys.getallocatedblocks()
+        \\for _ in range(20000): example_abi3.string_length(_s)
+        \\_str_growth = sys.getallocatedblocks() - _before
+    );
+    const growth = try python.eval(i64, "_str_growth");
+    if (growth > 1000) std.debug.print("allocated blocks grew by {d} over 20000 calls\n", .{growth});
+    try std.testing.expect(growth <= 1000);
+}
+
 test "decimal_double - returns an owned Decimal (no dangling buffer)" {
     const python = try initTestPython();
     try python.exec("from decimal import Decimal");
