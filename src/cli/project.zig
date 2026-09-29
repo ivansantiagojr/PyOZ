@@ -563,10 +563,16 @@ const build_zig_template =
     \\    // Strip option (can be set via -Dstrip=true or from pyoz CLI)
     \\    const strip = b.option(bool, "strip", "Strip debug symbols from the binary") orelse false;
     \\
+    \\    // Python Stable ABI (abi3): one wheel for CPython 3.10+. `pyoz build`
+    \\    // enables it from `abi3 = true` in pyproject.toml; with plain
+    \\    // `zig build`, pass -Dabi3=true.
+    \\    const abi3 = b.option(bool, "abi3", "Build for the Python Stable ABI (abi3)") orelse false;
+    \\
     \\    // Get PyOZ dependency
     \\    const pyoz_dep = b.dependency("PyOZ", .{
     \\        .target = target,
     \\        .optimize = optimize,
+    \\        .abi3 = abi3,
     \\    });
     \\
     \\    // Create the user's lib module
@@ -636,10 +642,16 @@ const build_zig_package_template =
     \\    // Strip option (can be set via -Dstrip=true or from pyoz CLI)
     \\    const strip = b.option(bool, "strip", "Strip debug symbols from the binary") orelse false;
     \\
+    \\    // Python Stable ABI (abi3): one wheel for CPython 3.10+. `pyoz build`
+    \\    // enables it from `abi3 = true` in pyproject.toml; with plain
+    \\    // `zig build`, pass -Dabi3=true.
+    \\    const abi3 = b.option(bool, "abi3", "Build for the Python Stable ABI (abi3)") orelse false;
+    \\
     \\    // Get PyOZ dependency
     \\    const pyoz_dep = b.dependency("PyOZ", .{
     \\        .target = target,
     \\        .optimize = optimize,
+    \\        .abi3 = abi3,
     \\    });
     \\
     \\    // Create the user's lib module

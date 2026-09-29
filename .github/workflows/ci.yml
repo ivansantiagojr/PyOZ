@@ -244,6 +244,30 @@ jobs:
                   python -m pip install dist/*.whl
                   (cd / && python -c "import demo; assert demo.add(2, 3) == 5; print('ok')")
 
+            # `abi3 = true` must produce a Stable ABI module (PyType_FromSpec),
+            # not a version-specific one (PyType_Ready) with an abi3 tag.
+            - name: abi3 = true builds a real Stable ABI module
+              if: runner.os == 'Linux'
+              run: |
+                  cd ../wheel-proj
+                  "$GITHUB_WORKSPACE/zig-out/bin/pyoz" init --local "$GITHUB_WORKSPACE" abiproj
+                  cd abiproj
+                  sed -i 's/^\[tool.pyoz\]/[tool.pyoz]\nabi3 = true/' pyproject.toml
+                  python - <<'PY'
+                  p = "src/lib.zig"
+                  s = open(p).read()
+                  s = s.replace("pub const Module = pyoz.module(.{",
+                      "const Box = struct {\n    v: i64,\n};\n\npub const Module = pyoz.module(.{", 1)
+                  s = s.replace(".classes = &.{},", '.classes = &.{pyoz.class("Box", Box)},', 1)
+                  open(p, "w").write(s)
+                  PY
+                  "$GITHUB_WORKSPACE/zig-out/bin/pyoz" build --release
+                  ls dist/*-cp310-abi3-*.whl
+                  nm -D --undefined-only zig-out/lib/abiproj.so | grep -q " PyType_FromSpec"
+                  if nm -D --undefined-only zig-out/lib/abiproj.so | grep -q " PyType_Ready$"; then
+                      echo "abi3 build uses PyType_Ready: not a Stable ABI build"; exit 1
+                  fi
+
             - name: Cross-build every target
               if: runner.os == 'Linux'
               run: |

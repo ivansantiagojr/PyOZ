@@ -249,13 +249,16 @@ pub fn buildModule(ctx: Ctx, opts: BuildOptions) !BuildResult {
         try argv.append(allocator, owned_args.getLast());
     }
 
-    // Headers reach PyOZ's build.zig through the environment (a dependency
-    // does not see the project's -D options).
+    // Headers and abi3 reach PyOZ's build.zig through the environment: a
+    // dependency does not see the project's -D options, and older project
+    // build.zig files would reject an unknown -Dabi3.
     var env: ?std.process.Environ.Map = null;
     defer if (env) |*e| e.deinit();
-    if (downloaded) |h| {
-        env = try ctx.environ.clone(allocator);
-        try env.?.put("PYOZ_PYTHON_INCLUDE", h.include_dir);
+    if (downloaded != null or config.getAbi3()) env = try ctx.environ.clone(allocator);
+    if (downloaded) |h| try env.?.put("PYOZ_PYTHON_INCLUDE", h.include_dir);
+    if (config.getAbi3()) {
+        std.debug.print("  ABI: abi3 (Stable ABI, CPython 3.10+)\n", .{});
+        try env.?.put("PYOZ_ABI3", "1");
     }
 
     if (!try sys.runInherit(io, argv.items, .{ .environ_map = if (env) |*e| e else null })) {

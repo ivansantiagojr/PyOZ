@@ -115,7 +115,12 @@ pub fn build(b: *std.Build) void {
     const sanitize = b.option(bool, "sanitize", "Enable address sanitizer") orelse false;
 
     // ABI3 option - Python 3.10 minimum (see src/lib/python/types.zig)
-    const abi3 = b.option(bool, "abi3", "Enable Python Stable ABI (Limited API) mode") orelse false;
+    // `pyoz build` sets PYOZ_ABI3 for projects with `abi3 = true`: a -D option
+    // would not reach this dependency from projects whose build.zig predates
+    // forwarding it (and would be rejected as unknown there). Either source
+    // enables abi3; newer templates forward their -Dabi3 (default false).
+    const abi3_env = if (b.graph.environ_map.get("PYOZ_ABI3")) |v| std.mem.eql(u8, v, "1") else false;
+    const abi3 = (b.option(bool, "abi3", "Enable Python Stable ABI (Limited API) mode") orelse false) or abi3_env;
 
     // Optional: override Python include paths (used by pypi/build.zig for cross-compilation)
     const python_include_dirs: ?[]const []const u8 = b.option([]const []const u8, "python-include-dirs", "Override Python include paths for cross-compilation") orelse
