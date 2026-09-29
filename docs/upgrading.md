@@ -25,11 +25,11 @@ in `build.zig`, and any `pyoz.fmt` return types. Everything else is additive.
 
 ## build.zig.zon
 
-Point the dependency at the 0.13.0 release and refresh its hash with `zig fetch`,
+Point the dependency at the latest 0.13 release and refresh its hash with `zig fetch`,
 which rewrites `build.zig.zon` for you:
 
 ```bash
-zig fetch --save=PyOZ https://github.com/pyozig/PyOZ/archive/refs/tags/v0.13.0.tar.gz
+zig fetch --save=PyOZ https://github.com/pyozig/PyOZ/archive/refs/tags/v0.13.1.tar.gz
 ```
 
 Then declare the minimum Zig version, so older compilers fail with a clear

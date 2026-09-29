@@ -180,3 +180,47 @@ jobs:
                   password: ${{ secrets.PYPI_API_TOKEN }}
                   packages-dir: pypi/dist/
                   skip-existing: true
+
+    # What a new user does right after the release: install pyoz from PyPI,
+    # create a project against the published tag (no --local), build a wheel,
+    # install and import it. Catches release-only breakage such as an unpinned
+    # dependency hash in `pyoz init`.
+    smoke-test:
+        name: Smoke test the published release
+        needs: [pypi, release]
+        runs-on: ${{ matrix.os }}
+        strategy:
+            fail-fast: false
+            matrix:
+                os: [ubuntu-latest, windows-latest, macos-latest]
+        defaults:
+            run:
+                shell: bash
+
+        steps:
+            - name: Setup Zig
+              uses: goto-bus-stop/setup-zig@v2
+              with:
+                  version: 0.16.0
+
+            - name: Setup Python
+              uses: actions/setup-python@v5
+              with:
+                  python-version: "3.12"
+
+            - name: pip install pyoz, pyoz init, pyoz build, import
+              run: |
+                  VERSION=${GITHUB_REF#refs/tags/v}
+                  # The index can lag a few minutes behind the upload
+                  for i in $(seq 1 20); do
+                      python -m pip install --no-cache-dir "pyoz==$VERSION" && break
+                      sleep 30
+                  done
+                  pyoz --version | grep -F "$VERSION"
+                  mkdir -p ../smoke && cd ../smoke
+                  pyoz init demo
+                  grep -F ".hash" demo/build.zig.zon
+                  cd demo
+                  pyoz build --release
+                  python -m pip install dist/*.whl
+                  (cd / && python -c "import demo; assert demo.add(2, 3) == 5; print('ok')")

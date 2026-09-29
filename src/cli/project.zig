@@ -99,10 +99,17 @@ pub fn create(ctx: Ctx, name_opt: ?[]const u8, in_current_dir: bool, local_pyoz_
     if (local_pyoz_path) |local_path| {
         try writeLocalBuildZigZon(allocator, io, project_dir, name, fingerprint, local_path);
     } else {
+        // `zig fetch --save` only records the hash when it adds the entry
+        // itself (Zig 0.16 leaves an existing hash-less entry untouched), so
+        // start with no dependencies and fall back to the URL-only entry.
         const zon = try replaceInTemplateExt(allocator, build_zig_zon_template, name, fingerprint);
         defer allocator.free(zon);
-        try project_dir.writeFile(io, .{ .sub_path = "build.zig.zon", .data = zon });
-        fetchDependencyHash(allocator, io, project_dir);
+        const empty = try withoutPyOzDependency(allocator, zon);
+        defer allocator.free(empty);
+        try project_dir.writeFile(io, .{ .sub_path = "build.zig.zon", .data = empty });
+        if (!fetchDependencyHash(allocator, io, project_dir)) {
+            try project_dir.writeFile(io, .{ .sub_path = "build.zig.zon", .data = zon });
+        }
     }
 
     // Create .gitignore
@@ -329,20 +336,42 @@ test relativePath {
 /// Pin the PyOZ dependency hash with the official `zig fetch --save`, which
 /// rewrites build.zig.zon in place. (Previously `zig build` was run twice and
 /// the fingerprint/hash scraped from compiler error messages.)
-fn fetchDependencyHash(allocator: std.mem.Allocator, io: Io, dir: Io.Dir) void {
+fn fetchDependencyHash(allocator: std.mem.Allocator, io: Io, dir: Io.Dir) bool {
     const url = "https://github.com/pyozig/PyOZ/archive/refs/tags/v" ++ version.string ++ ".tar.gz";
     const result = std.process.run(allocator, io, .{
         .argv = &.{ "zig", "fetch", "--save=PyOZ", url },
         .cwd = .{ .dir = dir },
     }) catch {
-        std.debug.print("  Note: could not run 'zig fetch'; run it manually:\n    zig fetch --save=PyOZ {s}\n", .{url});
-        return;
+        std.debug.print("  Note: could not run 'zig fetch'; remove the PyOZ entry from build.zig.zon, then run:\n    zig fetch --save=PyOZ {s}\n", .{url});
+        return false;
     };
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
     if (!sys.exitedOk(result.term)) {
-        std.debug.print("  Note: 'zig fetch' failed; run it manually once online:\n    zig fetch --save=PyOZ {s}\n", .{url});
+        std.debug.print("  Note: 'zig fetch' failed; once online, remove the PyOZ entry from build.zig.zon, then run:\n    zig fetch --save=PyOZ {s}\n", .{url});
+        return false;
     }
+    return true;
+}
+
+/// The rendered build.zig.zon template with `.dependencies = .{}`, for
+/// `zig fetch --save` to fill in.
+fn withoutPyOzDependency(allocator: std.mem.Allocator, zon: []const u8) ![]u8 {
+    const start = std.mem.indexOf(u8, zon, "    .dependencies = .{\n") orelse return error.TemplateMismatch;
+    const end_marker = "\n    },\n";
+    const end = std.mem.indexOfPos(u8, zon, start, end_marker) orelse return error.TemplateMismatch;
+    return std.mem.concat(allocator, u8, &.{ zon[0..start], "    .dependencies = .{},\n", zon[end + end_marker.len ..] });
+}
+
+test withoutPyOzDependency {
+    const a = std.testing.allocator;
+    const zon = try replaceInTemplateExt(a, build_zig_zon_template, "demo", "0x1");
+    defer a.free(zon);
+    const empty = try withoutPyOzDependency(a, zon);
+    defer a.free(empty);
+    try std.testing.expect(std.mem.indexOf(u8, empty, "    .dependencies = .{},\n    .paths = .{") != null);
+    try std.testing.expect(std.mem.indexOf(u8, empty, ".PyOZ") == null);
+    try std.testing.expect(std.mem.indexOf(u8, zon, ".url = \"https://github.com/pyozig/PyOZ/archive/refs/tags/v") != null);
 }
 
 fn writeLocalBuildZigZon(

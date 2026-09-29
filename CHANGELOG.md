@@ -5,6 +5,12 @@ All notable changes to PyOZ will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.1] - 2026-09-29
+
+### Fixed
+- **Projects created with `pyoz init` failed to build** with `dependency is missing hash field`. Zig 0.16's `zig fetch --save` leaves an existing hash-less dependency entry untouched, so the generated `build.zig.zon` never got its hash. `pyoz init` now lets `zig fetch --save` add the entry, and falls back to the URL-only entry (with instructions) when offline. Projects created with 0.13.0 can add the `.hash = "..."` line that the build error prints, or delete the `.PyOZ` entry and run `zig fetch --save=PyOZ https://github.com/pyozig/PyOZ/archive/refs/tags/v0.13.1.tar.gz`.
+- The release workflow now smoke-tests every release on Linux, macOS and Windows: `pip install pyoz`, `pyoz init` (without `--local`), `pyoz build`, install and import.
+
 ## [0.13.0] - 2026-09-29
 
 **Breaking:** requires Zig 0.16.0 and Python 3.10+; existing projects need a few `build.zig` edits (including one line for macOS); `pyoz.fmt` returns `pyoz.Formatted` (see Changed); wheels are now portable and tagged `manylinux_2_17_*` / `macosx_13_0_*`. Step-by-step instructions: [Upgrading to 0.13](https://pyoz.dev/upgrading/).
