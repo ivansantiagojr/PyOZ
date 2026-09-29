@@ -143,8 +143,8 @@ pub const Vec2 = struct {
     }
     pub const scale__doc__: [*:0]const u8 = "Return a new Vec2 scaled by the given factor";
 
-    pub fn __repr__(self: *const Vec2) [*:0]const u8 {
-        return pyoz.fmt("Vec2({d:.2}, {d:.2})", .{ self.x, self.y });
+    pub fn __repr__(self: *const Vec2) pyoz.Formatted("Vec2({d:.2}, {d:.2})", struct { f64, f64 }) {
+        return .{ .args = .{ self.x, self.y } };
     }
 
     pub fn __add__(self: *const Vec2, other: *const Vec2) Vec2 {

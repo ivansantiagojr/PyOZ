@@ -215,28 +215,19 @@ fn list_contains(items: pyoz.ListView(i64), target: i64) bool {
 }
 
 /// Process list of strings - join with separator
-fn join_strings(items: pyoz.ListView([]const u8), sep: []const u8) ?[]const u8 {
-    const len = items.len();
-    if (len == 0) return "";
-
-    // For simplicity, use a fixed buffer
-    var buffer: [4096]u8 = undefined;
-    var pos: usize = 0;
-
-    for (0..len) |i| {
-        if (items.get(i)) |s| {
-            if (i > 0) {
-                if (pos + sep.len > buffer.len) return null;
-                @memcpy(buffer[pos..][0..sep.len], sep);
-                pos += sep.len;
-            }
-            if (pos + s.len > buffer.len) return null;
-            @memcpy(buffer[pos..][0..s.len], s);
-            pos += s.len;
+fn join_strings(items: pyoz.ListView([]const u8), sep: []const u8) !pyoz.Owned([]const u8) {
+    // Build the result on the heap: returning a slice of a local buffer would
+    // dangle, because PyOZ converts the return value after this function returns.
+    const alloc = std.heap.smp_allocator;
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    for (0..items.len()) |i| {
+        if (items.get(i)) |item| {
+            if (i > 0) try out.appendSlice(alloc, sep);
+            try out.appendSlice(alloc, item);
         }
     }
-    // Return slice (Python will copy it)
-    return buffer[0..pos];
+    return pyoz.owned(alloc, try out.toOwnedSlice(alloc));
 }
 
 // ============================================================================
@@ -331,34 +322,20 @@ fn iter_product(items: pyoz.IteratorView(i64)) i64 {
 }
 
 /// Join strings from any iterable with a separator
-fn iter_join(items: pyoz.IteratorView([]const u8), sep: []const u8) []const u8 {
+fn iter_join(items: pyoz.IteratorView([]const u8), sep: []const u8) !pyoz.Owned([]const u8) {
+    // Heap result: a shared static buffer would race when called from several
+    // threads (this module declares .gil_used = false).
+    const alloc = std.heap.smp_allocator;
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
     var iter = items;
-    // For simplicity, we'll just concatenate the first few items
-    // In a real implementation, you'd use an allocator
-    var result: [1024]u8 = undefined;
-    var pos: usize = 0;
     var first = true;
-
-    while (iter.next()) |s| {
-        if (!first and pos + sep.len < result.len) {
-            @memcpy(result[pos .. pos + sep.len], sep);
-            pos += sep.len;
-        }
+    while (iter.next()) |item| {
+        if (!first) try out.appendSlice(alloc, sep);
         first = false;
-
-        const copy_len = @min(s.len, result.len - pos);
-        if (copy_len > 0) {
-            @memcpy(result[pos .. pos + copy_len], s[0..copy_len]);
-            pos += copy_len;
-        }
+        try out.appendSlice(alloc, item);
     }
-
-    // Return static buffer (valid for the duration of the Python call)
-    const static = struct {
-        var buf: [1024]u8 = undefined;
-    };
-    @memcpy(static.buf[0..pos], result[0..pos]);
-    return static.buf[0..pos];
+    return pyoz.owned(alloc, try out.toOwnedSlice(alloc));
 }
 
 /// Calculate average of floats from any iterable
@@ -574,14 +551,13 @@ fn make_decimal() pyoz.Decimal {
 }
 
 /// Double a decimal value (demonstration - returns as string then creates new)
-fn decimal_double(d: pyoz.Decimal) pyoz.Decimal {
+fn decimal_double(d: pyoz.Decimal) !pyoz.Owned(pyoz.Decimal) {
     // Parse and double (simple demonstration)
-    if (d.toFloat()) |f| {
-        var buf: [64]u8 = undefined;
-        const result = std.fmt.bufPrint(&buf, "{d}", .{f * 2.0}) catch return d;
-        return pyoz.Decimal.init(result);
-    }
-    return d;
+    // Heap-allocate the digits: a Decimal over a local buffer would dangle,
+    // because PyOZ converts the return value after this function returns.
+    const alloc = std.heap.smp_allocator;
+    const f = d.toFloat() orelse return error.InvalidDecimal;
+    return pyoz.owned(alloc, pyoz.Decimal.init(try std.fmt.allocPrint(alloc, "{d}", .{f * 2.0})));
 }
 
 // ============================================================================
@@ -1167,6 +1143,27 @@ const Point = struct {
     /// Add another point's coordinates to this one (returns new x+y sum for demo)
     pub fn dot(self: *const Point, other_x: f64, other_y: f64) f64 {
         return self.x * other_x + self.y * other_y;
+    }
+
+    /// Translate the point by dx and dy (keyword arguments)
+    pub fn translate(self: *Point, args: pyoz.Args(struct {
+        dx: f64 = 0,
+        dy: f64 = 0,
+    })) void {
+        self.x += args.value.dx;
+        self.y += args.value.dy;
+    }
+
+    /// Static method with keyword arguments: Point.on_axis(y=3)
+    pub fn on_axis(args: pyoz.Args(struct { x: f64 = 0, y: f64 = 0 })) Point {
+        return .{ .x = args.value.x, .y = args.value.y };
+    }
+
+    /// Class method with keyword arguments: Point.polar(r=2, theta=0.5, scale=1.5)
+    pub fn polar(comptime cls: type, args: pyoz.Args(struct { r: f64, theta: f64 = 0, scale: ?f64 = null })) Point {
+        _ = cls;
+        const k = args.value.scale orelse 1.0;
+        return .{ .x = args.value.r * k * @cos(args.value.theta), .y = args.value.r * k * @sin(args.value.theta) };
     }
 
     /// Static method: create origin point (no self!)
@@ -2742,8 +2739,8 @@ const ArenaClass = struct {
         self._arena.deinit();
     }
 
-    pub fn __repr__(self: *const ArenaClass) [*:0]const u8 {
-        return pyoz.fmt("ArenaClass(value={d})", .{self.value});
+    pub fn __repr__(self: *const ArenaClass) pyoz.Formatted("ArenaClass(value={d})", struct { @FieldType(ArenaClass, "value") }) {
+        return .{ .args = .{self.value} };
     }
 
     pub fn get_value(self: *const ArenaClass) i64 {
@@ -2996,6 +2993,17 @@ fn test_raise_discard(value: i64) ?i64 {
 // Test: pyoz.fmt() for formatted error messages
 // ============================================================================
 
+/// Test pyoz.fmt with a message longer than the old 4 KB buffer (was replaced
+/// by "fmt: message too long"; now rendered in full via the heap slow path)
+fn test_fmt_long(n: i64) ?i64 {
+    return pyoz.raiseValueError(pyoz.fmt("{s}|{d}", .{ "x" ** 5000, n }));
+}
+
+/// Test pyoz.fmt as an ordinary function return type (lazy -> str)
+fn test_fmt_return(a: i64, b: i64) pyoz.Formatted("{d}+{d}={d}", struct { i64, i64, i64 }) {
+    return .{ .args = .{ a, b, a + b } };
+}
+
 /// Test pyoz.fmt with raiseValueError
 fn test_fmt_raise(value: i64, limit: i64) ?i64 {
     if (value > limit) return pyoz.raiseValueError(pyoz.fmt("value {d} exceeds limit {d}", .{ value, limit }));
@@ -3012,12 +3020,280 @@ fn setupSubmodules(module: *pyoz.PyObject) callconv(.c) c_int {
     return 0;
 }
 
+// ============================================================================
+// Free-threading: per-object locking (see src/lib/class/threading.zig)
+// ============================================================================
+
+/// Non-atomic read-modify-write. Safe under free-threading because PyOZ
+/// wraps every method in a critical section on `self`.
+const Tally = struct {
+    total: i64 = 0,
+    calls: i64 = 0,
+
+    pub fn add(self: *Tally, n: i64) void {
+        const t = self.total;
+        // Force a context switch inside the read-modify-write so the race is
+        // observable even on a single core (a critical section stays held
+        // across it: yielding the CPU does not detach the Python thread state).
+        std.Thread.yield() catch {};
+        self.total = t + n;
+        self.calls += 1;
+    }
+};
+
+/// Free-threading memory-safety target: concurrent appends to an ArrayList
+/// race on reallocation (corruption or crash, not just a wrong count) unless
+/// PyOZ's per-object critical sections serialize them.
+const Bag = struct {
+    tag: i64,
+    _items: std.ArrayListUnmanaged(i64) = .empty,
+
+    pub fn push(self: *Bag, v: i64) !void {
+        try self._items.append(std.heap.smp_allocator, v);
+    }
+
+    pub fn size(self: *const Bag) i64 {
+        return @intCast(self._items.items.len);
+    }
+
+    /// Sum of all items; with correct locking this equals sum(range(n)).
+    pub fn total(self: *const Bag) i64 {
+        var t: i64 = 0;
+        for (self._items.items) |v| t += v;
+        return t;
+    }
+
+    pub fn __del__(self: *Bag) void {
+        self._items.deinit(std.heap.smp_allocator);
+    }
+};
+
+/// Shared iterator for the free-threading stress test: `__next__` is a slot
+/// (tp_iternext), not a method, so this checks that slots take the object lock.
+/// The yield between read and write makes a missing lock visible as duplicated
+/// or lost items even on one core.
+const SharedCursor = struct {
+    n: i64,
+
+    pub fn __iter__(self: *SharedCursor) *SharedCursor {
+        return self;
+    }
+
+    pub fn __next__(self: *SharedCursor) ?i64 {
+        const v = self.n;
+        if (v <= 0) return null;
+        std.Thread.yield() catch {};
+        self.n = v - 1;
+        return v;
+    }
+};
+
+/// Control: identical, but opted out of locking. Loses updates under
+/// contention on free-threaded builds, proving the locks are doing the work.
+const UnlockedTally = struct {
+    pub const __lock__ = false;
+    total: i64 = 0,
+    calls: i64 = 0,
+
+    pub fn add(self: *UnlockedTally, n: i64) void {
+        const t = self.total;
+        // Force a context switch inside the read-modify-write so the race is
+        // observable even on a single core (a critical section stays held
+        // across it: yielding the CPU does not detach the Python thread state).
+        std.Thread.yield() catch {};
+        self.total = t + n;
+        self.calls += 1;
+    }
+};
+
+// ============================================================================
+// Async (asyncio <-> std.Io, see src/lib/aio.zig)
+// ============================================================================
+
+/// Sleeps on the Io runtime (a cancellation point), then returns a value.
+fn async_sleep_add(io: std.Io, ms: i64, a: i64, b: i64) !i64 {
+    try io.sleep(.fromMilliseconds(ms), .awake);
+    return a + b;
+}
+
+/// Uses the per-call arena; the returned slice is converted before it is freed.
+fn async_greet(arena: std.mem.Allocator, name: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(arena, "hello, {s}!", .{name});
+}
+
+/// Errors map to Python exceptions like synchronous functions.
+fn async_fail(io: std.Io, ms: i64) !i64 {
+    try io.sleep(.fromMilliseconds(ms), .awake);
+    return error.ValueError;
+}
+
+/// Takes a PyOZ class by value (copied at call time) and returns a new
+/// instance: results are converted with the module's class registry.
+fn async_scale_point(io: std.Io, p: Point, k: f64) !Point {
+    try io.checkCancel();
+    return .{ .x = p.x * k, .y = p.y * k };
+}
+
+/// Module error mappings apply to async errors too (NegativeValue -> ValueError
+/// with the mapped message, ValueTooLarge -> custom message).
+fn async_checked(n: i64) !i64 {
+    if (n < 0) return error.NegativeValue;
+    if (n > 1000) return error.ValueTooLarge;
+    return n * 2;
+}
+
+/// 8 Python-visible parameters (the maximum).
+fn async_sum8(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64) i64 {
+    return a + b + c + d + e + f + g + h;
+}
+
+/// Frozen class: its async method *borrows* self (kept alive until joined).
+const FrozenVec = struct {
+    pub const __frozen__ = true;
+    x: f64,
+    y: f64,
+
+    fn slowNormImpl(self: *const FrozenVec, io: std.Io, ms: i64) !f64 {
+        try io.sleep(.fromMilliseconds(ms), .awake);
+        return @sqrt(self.x * self.x + self.y * self.y);
+    }
+    pub const slow_norm = pyoz.asyncMethod(slowNormImpl);
+};
+
+/// Mutable class: async methods take `self` by value and run on a copy.
+const AsyncCounter = struct {
+    value: i64,
+
+    pub fn inc(self: *AsyncCounter) void {
+        self.value += 1;
+    }
+
+    fn valueLaterImpl(self: AsyncCounter, io: std.Io, ms: i64) !i64 {
+        try io.sleep(.fromMilliseconds(ms), .awake);
+        return self.value;
+    }
+    pub const value_later = pyoz.asyncMethod(valueLaterImpl);
+
+    /// Mutates its copy only; the Python object is unaffected.
+    fn bumpedCopyImpl(self: AsyncCounter, by: i64) i64 {
+        var copy = self;
+        copy.value += by;
+        return copy.value;
+    }
+    pub const bumped_copy = pyoz.asyncMethod(bumpedCopyImpl);
+};
+
+// ----------------------------------------------------------------------------
+// Async protocols: __aiter__ / __anext__ / __await__ / __aenter__ / __aexit__
+// ----------------------------------------------------------------------------
+
+/// Async iterator with synchronous values: `async for x in Countdown(3)`
+/// yields 3, 2, 1. Returning null ends the iteration.
+const Countdown = struct {
+    n: i64,
+
+    pub fn __aiter__(self: *Countdown) *Countdown {
+        return self;
+    }
+
+    pub fn __anext__(self: *Countdown) ?i64 {
+        if (self.n <= 0) return null;
+        defer self.n -= 1;
+        return self.n;
+    }
+};
+
+/// Simulated remote fetch: page `page` of `pages`, or null past the end.
+/// The end of the stream is only discovered by the task itself.
+fn fetchPageImpl(io: std.Io, page: i64, pages: i64, ms: i64) !?i64 {
+    try io.sleep(.fromMilliseconds(ms), .awake);
+    if (page >= pages) return null;
+    return page * 10;
+}
+const fetchPage = pyoz.asyncFn(fetchPageImpl);
+
+/// Async iterator whose items are produced by std.Io tasks. `__anext__` runs
+/// on the object (under its lock) to advance the cursor, then hands the slow
+/// part to a task; a null task result raises StopAsyncIteration. Once past
+/// the end it returns null directly, without starting a task.
+const AsyncPages = struct {
+    pages: i64,
+    ms: i64,
+    _next: i64 = 0,
+
+    pub fn __aiter__(self: *AsyncPages) *AsyncPages {
+        return self;
+    }
+
+    pub fn __anext__(self: *AsyncPages) !?pyoz.Future(fetchPageImpl) {
+        if (self._next > self.pages) return null;
+        defer self._next += 1;
+        return try fetchPage(self._next, self.pages, self.ms);
+    }
+};
+
+/// Awaitable object: `await Delayed(v, ms)` resolves to v after ms, on a task.
+const Delayed = struct {
+    value: i64,
+    ms: i64,
+
+    fn awaitImpl(self: Delayed, io: std.Io) !i64 {
+        try io.sleep(.fromMilliseconds(self.ms), .awake);
+        return self.value;
+    }
+    pub const __await__ = pyoz.asyncMethod(awaitImpl);
+};
+
+/// Awaitable that completes immediately: `await Immediate(v)` is v * 2.
+const Immediate = struct {
+    value: i64,
+
+    pub fn __await__(self: *const Immediate) i64 {
+        return self.value * 2;
+    }
+};
+
+/// Async context manager: `async with AsyncResource() as r` gives back r;
+/// __aexit__ records the exception type and never suppresses it.
+const AsyncResource = struct {
+    entered: i64 = 0,
+    exited: i64 = 0,
+    saw_error: bool = false,
+
+    pub fn __aenter__(self: *AsyncResource) *AsyncResource {
+        self.entered += 1;
+        return self;
+    }
+
+    pub fn __aexit__(self: *AsyncResource, exc_type: ?*pyoz.PyObject, exc: ?*pyoz.PyObject, tb: ?*pyoz.PyObject) bool {
+        _ = exc;
+        _ = tb;
+        self.exited += 1;
+        self.saw_error = exc_type != null;
+        return false;
+    }
+};
+
+fn async_live_jobs() usize {
+    return pyoz.asyncLiveJobs();
+}
+
+/// CPU-bound work with no Io calls: runs in parallel with Python.
+fn async_sum(n: i64) i64 {
+    var total: i64 = 0;
+    var i: i64 = 0;
+    while (i < n) : (i += 1) total +%= i;
+    return total;
+}
+
 pub const Example = pyoz.module(.{
     .name = "example",
     .doc = "Example PyOZ module - Python bindings for Zig made easy!",
+    // Safe to run without the GIL on free-threaded CPython (PEP 703)
+    .gil_used = false,
     .module_init = &setupSubmodules,
     .funcs = &.{
-        pyoz.func("add", add, "Add two integers"),
+        pyoz.func("add", add, "Add two integers").withParams("a, b"),
         pyoz.func("multiply", multiply, "Multiply two floats"),
         pyoz.func("divide", divide, "Divide two numbers (raises error if b=0)"),
         pyoz.func("validate_positive", validate_positive, "Validate that a number is non-negative"),
@@ -3149,6 +3425,16 @@ pub const Example = pyoz.module(.{
         pyoz.func("test_raise_runtime", test_raise_runtime, "Test raiseRuntimeError one-liner pattern"),
         pyoz.func("test_raise_discard", test_raise_discard, "Test raiseValueError discard pattern"),
         pyoz.func("test_fmt_raise", test_fmt_raise, "Test pyoz.fmt with raiseValueError"),
+        pyoz.func("async_sleep_add", pyoz.asyncFn(async_sleep_add), "await: sleep ms then a+b").withParams("ms, a, b"),
+        pyoz.func("async_greet", pyoz.asyncFn(async_greet), "await: arena-allocated greeting").withParams("name"),
+        pyoz.func("async_fail", pyoz.asyncFn(async_fail), "await: raises ValueError"),
+        pyoz.func("async_sum", pyoz.asyncFn(async_sum), "await: CPU-bound sum"),
+        pyoz.func("async_live_jobs", async_live_jobs, "Async jobs not yet cleaned up"),
+        pyoz.func("async_scale_point", pyoz.asyncFn(async_scale_point), "await: scaled Point").withParams("point, factor"),
+        pyoz.func("async_checked", pyoz.asyncFn(async_checked), "await: error mappings apply"),
+        pyoz.func("async_sum8", pyoz.asyncFn(async_sum8), "await: 8 parameters"),
+        pyoz.func("test_fmt_long", test_fmt_long, "Test pyoz.fmt with a >4KB message"),
+        pyoz.func("test_fmt_return", test_fmt_return, "Test pyoz.fmt as a return type"),
         // Ref(T) test functions
         pyoz.func("make_ref_child", make_ref_child, "Create a RefChild holding a Ref to an Owner"),
         pyoz.func("make_ref_child_freelist", make_ref_child_freelist, "Create a RefChildFreelist holding a Ref to an Owner"),
@@ -3156,6 +3442,17 @@ pub const Example = pyoz.module(.{
     .classes = &.{
         pyoz.class("Point", Point),
         pyoz.class("BoundedValue", BoundedValue),
+        pyoz.class("FrozenVec", FrozenVec),
+        pyoz.class("AsyncCounter", AsyncCounter),
+        pyoz.class("Countdown", Countdown),
+        pyoz.class("AsyncPages", AsyncPages),
+        pyoz.class("Delayed", Delayed),
+        pyoz.class("Immediate", Immediate),
+        pyoz.class("AsyncResource", AsyncResource),
+        pyoz.class("Bag", Bag),
+        pyoz.class("Tally", Tally),
+        pyoz.class("SharedCursor", SharedCursor),
+        pyoz.class("UnlockedTally", UnlockedTally),
         pyoz.class("IntArray", IntArray),
         pyoz.class("VulnArray", VulnArray),
         pyoz.class("BadBuffer", BadBuffer),

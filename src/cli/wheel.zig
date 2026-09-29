@@ -5,8 +5,28 @@ const builder = @import("builder.zig");
 const pypi = @import("pypi.zig");
 const zip = @import("zip.zig");
 const symreader = @import("symreader.zig");
+const sys = @import("sys.zig");
+const binfo = @import("binfo.zig");
+const metadata = @import("metadata.zig");
+const target_mod = @import("target.zig");
+const Target = target_mod.Target;
+const Python = target_mod.Python;
+const Ctx = sys.Ctx;
+const Io = std.Io;
 
-/// Build a wheel package (.whl)
+pub const WheelOptions = struct {
+    release: bool = false,
+    stubs: bool = true,
+    /// Platforms to build wheels for; empty means this machine's platform.
+    targets: []const Target = &.{},
+    /// CPython version to build for; null means the `python3` on PATH.
+    python: ?Python = null,
+    /// Build for this machine only (native CPU and libc). Such wheels may use
+    /// CPU instructions other machines lack; they are not for distribution.
+    native: bool = false,
+};
+
+/// Build a wheel package (.whl) for this platform; returns its path (caller frees).
 /// A wheel is a ZIP file with a specific structure:
 ///   {module}.{ext}                    - The compiled extension
 ///   {module}.pyi                      - Type stubs (optional)
@@ -14,9 +34,49 @@ const symreader = @import("symreader.zig");
 ///     WHEEL                           - Wheel metadata
 ///     METADATA                        - Package metadata
 ///     RECORD                          - File hashes
-pub fn buildWheel(allocator: std.mem.Allocator, release: bool, generate_stubs: bool) ![]const u8 {
+pub fn buildWheel(ctx: Ctx, release: bool, generate_stubs: bool) ![]const u8 {
+    const paths = try buildWheels(ctx, .{ .release = release, .stubs = generate_stubs });
+    defer ctx.gpa.free(paths);
+    return paths[0];
+}
+
+/// Build one wheel per target; returns their paths (caller frees each and the slice).
+pub fn buildWheels(ctx: Ctx, opts: WheelOptions) ![][]const u8 {
+    const allocator = ctx.gpa;
+    const host = Target.host() orelse return error.UnsupportedHost;
+    const targets: []const Target = if (opts.targets.len > 0) opts.targets else &.{host};
+
+    var paths: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (paths.items) |p| allocator.free(p);
+        paths.deinit(allocator);
+    }
+    for (targets) |t| {
+        const path = buildOneWheel(ctx, opts, t) catch |err| switch (err) {
+            // e.g. CPython 3.10 on Windows ARM64: skip it when building several
+            error.UnsupportedPython => if (targets.len > 1) {
+                var buf: [32]u8 = undefined;
+                std.debug.print("  Skipping {s}: no CPython build for it.\n\n", .{t.name(&buf)});
+                continue;
+            } else return err,
+            else => return err,
+        };
+        try paths.append(allocator, path);
+    }
+    if (paths.items.len == 0) return error.NothingBuilt;
+
+    if (paths.items.len > 1) {
+        std.debug.print("\nBuilt {d} wheels:\n", .{paths.items.len});
+        for (paths.items) |p| std.debug.print("  {s}\n", .{p});
+    }
+    return paths.toOwnedSlice(allocator);
+}
+
+fn buildOneWheel(ctx: Ctx, opts: WheelOptions, target: Target) ![]const u8 {
+    const allocator = ctx.gpa;
+    const io = ctx.io;
     // Load project configuration
-    var config = project.toml.loadPyProject(allocator) catch |err| {
+    var config = project.toml.loadPyProject(allocator, io) catch |err| {
         if (err == error.PyProjectNotFound) {
             std.debug.print("Error: pyproject.toml not found. Run 'pyoz init' first.\n", .{});
             return err;
@@ -25,46 +85,80 @@ pub fn buildWheel(allocator: std.mem.Allocator, release: bool, generate_stubs: b
     };
     defer config.deinit(allocator);
 
-    // Detect Python for version tag
-    var python = builder.detectPython(allocator) catch |err| {
-        std.debug.print("Error: Could not detect Python.\n", .{});
-        return err;
-    };
-    defer python.deinit(allocator);
+    // [tool.pyoz] linux-platform-tag: a manylinux tag sets the glibc floor;
+    // a plain linux_* tag asks for a native (non-portable) build.
+    var native = opts.native;
+    var glibc: target_mod.Glibc = .{};
+    const tag_setting = config.getLinuxPlatformTag();
+    if (target.os == .linux and tag_setting.len > 0) {
+        if (target_mod.Glibc.fromTag(tag_setting)) |g| {
+            glibc = g;
+        } else if (std.mem.startsWith(u8, tag_setting, "linux_")) {
+            native = true;
+        } else {
+            std.debug.print("Error: unsupported linux-platform-tag \"{s}\" (use manylinux_2_X_<arch> or linux_<arch>)\n", .{tag_setting});
+            return error.UnsupportedPlatformTag;
+        }
+    }
+    if (native and !target.isHost()) {
+        std.debug.print("Error: --native builds only for this machine; drop --target or --native.\n", .{});
+        return error.NativeCrossBuild;
+    }
 
     // Build the module first
-    var build_result = try builder.buildModule(allocator, release);
+    var build_result = try builder.buildModule(ctx, .{
+        .release = opts.release,
+        .target = if (native) null else target,
+        .python = opts.python,
+        .glibc = glibc,
+    });
     defer build_result.deinit(allocator);
+    const py = build_result.python;
+
+    // The Stable ABI does not exist for free-threaded CPython (before 3.15's abi3t)
+    var py_buf: [16]u8 = undefined;
+    if (config.getAbi3() and py.freethreaded) {
+        std.debug.print("Error: abi3 = true cannot target free-threaded Python {s}.\n", .{py.name(&py_buf)});
+        std.debug.print("Build for a regular interpreter, or set abi3 = false for a cp3XYt wheel.\n", .{});
+        return error.Abi3NotSupportedOnFreeThreaded;
+    }
 
     std.debug.print("\nCreating wheel package...\n", .{});
 
     // Create dist directory
-    const cwd = std.fs.cwd();
-    cwd.makeDir("dist") catch |err| {
+    const cwd = Io.Dir.cwd();
+    cwd.createDir(io, "dist", .default_dir) catch |err| {
         if (err != error.PathAlreadyExists) return err;
     };
 
-    // Generate wheel filename
-    // Format: {distribution}-{version}-{python}-{abi}-{platform}.whl
-    const platform_tag = try getPlatformTag(allocator, config.getLinuxPlatformTag());
-    defer if (builtin.os.tag == .macos) allocator.free(platform_tag);
+    // Tags: ABI3 wheels are cp310-abi3 (the Python 3.10 minimum); otherwise
+    // cpXY-cpXY[t]. The platform tag is read from the built binary.
+    var pytag_buf: [16]u8 = undefined;
+    var abitag_buf: [16]u8 = undefined;
+    const python_tag: []const u8 = if (config.getAbi3()) "cp310" else py.pythonTag(&pytag_buf);
+    const abi_tag: []const u8 = if (config.getAbi3()) "abi3" else py.abiTag(&abitag_buf);
 
-    // For ABI3 wheels, use hardcoded Python 3.8 minimum
-    // Format: cp38-abi3-{platform}
-    // For non-ABI3, use current Python version: cpXY-cpXY-{platform}
-    const python_tag = if (config.getAbi3())
-        "cp38" // ABI3 hardcoded to Python 3.8
-    else
-        try std.fmt.allocPrint(allocator, "cp{d}{d}", .{ python.version_major, python.version_minor });
-    defer if (!config.getAbi3()) allocator.free(python_tag);
+    var tag = try binfo.platformTagOfFile(allocator, io, build_result.module_path);
+    defer allocator.free(tag.text);
+    defer if (tag.not_portable) |np| allocator.free(np);
+    if (tag.not_portable) |why| {
+        std.debug.print("  Warning: tagging {s}: {s}. PyPI does not accept linux_* wheels.\n", .{ tag.text, why });
+    } else if (native and target.os == .linux) {
+        // Native builds may use this CPU's instructions: not a manylinux wheel
+        allocator.free(tag.text);
+        tag.text = try std.fmt.allocPrint(allocator, "linux_{s}", .{@tagName(target.arch)});
+    }
+    if (native) std.debug.print("  Note: native build (this machine's CPU); do not publish this wheel.\n", .{});
+    const platform_tag = tag.text;
+    std.debug.print("  Platform tag: {s}\n", .{platform_tag});
 
-    // ABI tag: "abi3" for ABI3 mode, same as python_tag for non-ABI3
-    const abi_tag: []const u8 = if (config.getAbi3()) "abi3" else python_tag;
+    const dist_name = try normalizeDistName(allocator, config.name);
+    defer allocator.free(dist_name);
 
     const wheel_filename = try std.fmt.allocPrint(
         allocator,
         "{s}-{s}-{s}-{s}-{s}.whl",
-        .{ config.name, config.getVersion(), python_tag, abi_tag, platform_tag },
+        .{ dist_name, config.getVersion(), python_tag, abi_tag, platform_tag },
     );
     defer allocator.free(wheel_filename);
 
@@ -75,9 +169,9 @@ pub fn buildWheel(allocator: std.mem.Allocator, release: bool, generate_stubs: b
     var stub_content: ?[]const u8 = null;
     defer if (stub_content) |sc| allocator.free(sc);
 
-    if (generate_stubs) {
+    if (opts.stubs) {
         std.debug.print("  Extracting type stubs from module...\n", .{});
-        stub_content = symreader.extractStubs(allocator, build_result.module_path) catch |err| blk: {
+        stub_content = symreader.extractStubs(io, allocator, build_result.module_path) catch |err| blk: {
             std.debug.print("  Warning: Could not extract stubs: {}\n", .{err});
             break :blk null;
         };
@@ -90,10 +184,18 @@ pub fn buildWheel(allocator: std.mem.Allocator, release: bool, generate_stubs: b
     }
 
     // Create the wheel (ZIP file)
-    try createWheelZip(allocator, wheel_path, &config, &python, build_result.module_path, build_result.module_name, stub_content);
+    // Reproducible builds: honor SOURCE_DATE_EPOCH for ZIP entry timestamps
+    const mtime: ?i64 = if (ctx.environ.get("SOURCE_DATE_EPOCH")) |v|
+        std.fmt.parseInt(i64, std.mem.trim(u8, v, &std.ascii.whitespace), 10) catch null
+    else
+        null;
+
+    const wheel_tag = try std.fmt.allocPrint(allocator, "{s}-{s}-{s}", .{ python_tag, abi_tag, platform_tag });
+    defer allocator.free(wheel_tag);
+    try createWheelZip(allocator, io, mtime, dist_name, wheel_path, &config, wheel_tag, build_result.module_path, build_result.module_name, stub_content);
 
     std.debug.print("\nWheel created: {s}\n", .{wheel_path});
-    std.debug.print("\nTo install locally: pip install {s}\n", .{wheel_path});
+    if (target.isHost()) std.debug.print("\nTo install locally: pip install {s}\n", .{wheel_path});
     std.debug.print("To publish: pyoz publish\n", .{});
 
     // Return owned path (caller must free)
@@ -102,20 +204,24 @@ pub fn buildWheel(allocator: std.mem.Allocator, release: bool, generate_stubs: b
 
 fn createWheelZip(
     allocator: std.mem.Allocator,
+    io: Io,
+    mtime: ?i64,
+    dist_name: []const u8,
     wheel_path: []const u8,
     config: *const project.toml.PyProjectConfig,
-    python: *const builder.PythonConfig,
+    /// "{python}-{abi}-{platform}", e.g. "cp312-cp312-manylinux_2_17_x86_64"
+    wheel_tag: []const u8,
     module_path: []const u8,
     module_name: []const u8,
     stub_content: ?[]const u8,
 ) !void {
-    const cwd = std.fs.cwd();
+    const cwd = Io.Dir.cwd();
 
     // Delete existing wheel file if present
-    cwd.deleteFile(wheel_path) catch {};
+    cwd.deleteFile(io, wheel_path) catch {};
 
     // Create ZIP writer for the wheel
-    var z = try zip.ZipWriter.init(allocator, wheel_path);
+    var z = try zip.ZipWriter.init(allocator, io, wheel_path, .{ .mtime = mtime });
     defer z.deinit();
 
     // Detect package mode: py-packages contains project name
@@ -154,211 +260,256 @@ fn createWheelZip(
     }
 
     // Add pure Python packages
-    var py_files = std.ArrayListUnmanaged([]const u8){};
+    var py_files: std.ArrayList([]const u8) = .empty;
     defer {
         for (py_files.items) |f| allocator.free(f);
         py_files.deinit(allocator);
     }
 
     for (config.py_packages.items) |pkg| {
-        try addPythonPackage(allocator, &z, cwd, pkg, &py_files, config);
+        try addPythonPackage(allocator, io, &z, cwd, pkg, &py_files, config);
     }
 
     // Create dist-info directory name
-    const dist_info_name = try std.fmt.allocPrint(allocator, "{s}-{s}.dist-info", .{ config.name, config.getVersion() });
+    const dist_info_name = try std.fmt.allocPrint(allocator, "{s}-{s}.dist-info", .{ dist_name, config.getVersion() });
     defer allocator.free(dist_info_name);
 
-    // Create WHEEL file content with appropriate tag based on ABI3 mode
-    const platform_tag = try getPlatformTag(allocator, config.getLinuxPlatformTag());
-    defer if (builtin.os.tag == .macos) allocator.free(platform_tag);
-
-    const wheel_content = if (config.getAbi3())
-        // ABI3 mode: hardcoded cp38-abi3 tag
-        try std.fmt.allocPrint(allocator,
-            \\Wheel-Version: 1.0
-            \\Generator: pyoz
-            \\Root-Is-Purelib: false
-            \\Tag: cp38-abi3-{s}
-            \\
-        , .{platform_tag})
-    else
-        // Non-ABI3 mode: use cpXY-cpXY tag format
-        try std.fmt.allocPrint(allocator,
-            \\Wheel-Version: 1.0
-            \\Generator: pyoz
-            \\Root-Is-Purelib: false
-            \\Tag: cp{d}{d}-cp{d}{d}-{s}
-            \\
-        , .{ python.version_major, python.version_minor, python.version_major, python.version_minor, platform_tag });
+    const wheel_content = try std.fmt.allocPrint(allocator,
+        \\Wheel-Version: 1.0
+        \\Generator: pyoz
+        \\Root-Is-Purelib: false
+        \\Tag: {s}
+        \\
+    , .{wheel_tag});
     defer allocator.free(wheel_content);
 
     const wheel_file_path = try std.fmt.allocPrint(allocator, "{s}/WHEEL", .{dist_info_name});
     defer allocator.free(wheel_file_path);
     try z.addFile(wheel_file_path, wheel_content);
 
-    // Try to read README.md for the long description
-    const readme_content: ?[]const u8 = cwd.readFileAlloc(allocator, "README.md", 1024 * 1024) catch null;
-    defer if (readme_content) |rc| allocator.free(rc);
+    try addMetadata(allocator, io, &z, dist_info_name);
 
-    // Create METADATA file content
-    const metadata_content = if (readme_content) |readme|
-        try std.fmt.allocPrint(allocator,
-            \\Metadata-Version: 2.1
-            \\Name: {s}
-            \\Version: {s}
-            \\Summary: {s}
-            \\Requires-Python: {s}
-            \\Description-Content-Type: text/markdown
-            \\
-            \\{s}
-        , .{ config.name, config.getVersion(), config.description, config.getPythonRequires(), readme })
-    else
-        try std.fmt.allocPrint(allocator,
-            \\Metadata-Version: 2.1
-            \\Name: {s}
-            \\Version: {s}
-            \\Summary: {s}
-            \\Requires-Python: {s}
-            \\
-        , .{ config.name, config.getVersion(), config.description, config.getPythonRequires() });
-    defer allocator.free(metadata_content);
-
-    const metadata_file_path = try std.fmt.allocPrint(allocator, "{s}/METADATA", .{dist_info_name});
-    defer allocator.free(metadata_file_path);
-    try z.addFile(metadata_file_path, metadata_content);
-
-    // Create RECORD file content (list of files with hashes)
-    // Start with the module and stubs
-    var record_buf = std.ArrayListUnmanaged(u8){};
-    defer record_buf.deinit(allocator);
-
-    // Use the wheel path for the module (may include package prefix)
-    try record_buf.appendSlice(allocator, if (wheel_module_name) |wmn| wmn else module_name);
-    try record_buf.appendSlice(allocator, ",,\n");
-
-    if (stub_name) |sn| {
-        try record_buf.appendSlice(allocator, sn);
-        try record_buf.appendSlice(allocator, ",,\n");
-    }
-
-    // Add Python package files to RECORD
-    for (py_files.items) |pf| {
-        try record_buf.appendSlice(allocator, pf);
-        try record_buf.appendSlice(allocator, ",,\n");
-    }
-
-    try record_buf.appendSlice(allocator, dist_info_name);
-    try record_buf.appendSlice(allocator, "/WHEEL,,\n");
-    try record_buf.appendSlice(allocator, dist_info_name);
-    try record_buf.appendSlice(allocator, "/METADATA,,\n");
-    try record_buf.appendSlice(allocator, dist_info_name);
-    try record_buf.appendSlice(allocator, "/RECORD,,\n");
-
-    const record_content = record_buf.items;
-
+    // RECORD: every file with its sha256 and size (RECORD itself is unhashed)
     const record_file_path = try std.fmt.allocPrint(allocator, "{s}/RECORD", .{dist_info_name});
     defer allocator.free(record_file_path);
-    try z.addFile(record_file_path, record_content);
+
+    var record_buf: std.ArrayList(u8) = .empty;
+    defer record_buf.deinit(allocator);
+    try z.appendRecord(&record_buf, record_file_path);
+
+    try z.addFile(record_file_path, record_buf.items);
 
     // Finalize the ZIP file
     try z.finish();
 }
 
-/// Get platform tag for wheel filename
-/// If linux_platform_tag is provided (non-empty), use it for Linux builds.
-/// Otherwise, use the default platform-specific tag.
-/// For macOS, detects the actual OS version at runtime.
-fn getPlatformTag(allocator: std.mem.Allocator, linux_platform_tag: []const u8) ![]const u8 {
-    return switch (builtin.os.tag) {
-        .linux => if (linux_platform_tag.len > 0)
-            linux_platform_tag
-        else switch (builtin.cpu.arch) {
-            .x86_64 => "linux_x86_64",
-            .aarch64 => "linux_aarch64",
-            else => "linux_unknown",
-        },
-        .macos => try getMacOSPlatformTag(allocator),
-        .windows => switch (builtin.cpu.arch) {
-            .x86_64 => "win_amd64",
-            .x86 => "win32",
-            .aarch64 => "win_arm64",
-            else => "win_unknown",
-        },
-        else => "unknown",
-    };
+/// METADATA, license files and entry_points.txt (see metadata.zig), shared
+/// by regular and editable wheels.
+fn addMetadata(allocator: std.mem.Allocator, io: Io, z: *zip.ZipWriter, dist_info: []const u8) !void {
+    const cwd = Io.Dir.cwd();
+    var md = try metadata.build(allocator, io, cwd);
+    defer md.deinit(allocator);
+
+    const meta_path = try std.fmt.allocPrint(allocator, "{s}/METADATA", .{dist_info});
+    defer allocator.free(meta_path);
+    try z.addFile(meta_path, md.text);
+
+    for (md.license_files) |f| {
+        const in_wheel = try std.fmt.allocPrint(allocator, "{s}/licenses/{s}", .{ dist_info, f });
+        defer allocator.free(in_wheel);
+        try z.addFileFromDisk(in_wheel, f);
+    }
+    if (md.entry_points) |ep| {
+        const ep_path = try std.fmt.allocPrint(allocator, "{s}/entry_points.txt", .{dist_info});
+        defer allocator.free(ep_path);
+        try z.addFile(ep_path, ep);
+    }
 }
 
-/// Get macOS platform tag by detecting the actual OS version at runtime via Python
-fn getMacOSPlatformTag(allocator: std.mem.Allocator) ![]const u8 {
-    const arch_str = switch (builtin.cpu.arch) {
-        .x86_64 => "x86_64",
-        .aarch64 => "arm64",
-        else => "unknown",
-    };
+/// Build a PEP 660 editable wheel in `out_dir` and return its path (caller frees).
+///
+/// The extension is built in debug mode (or the pyproject `optimize` setting)
+/// and stays in zig-out/; the wheel only contains a `__editable__.*.pth` file
+/// that puts the build output directory (and, for Python packages, their
+/// parent directory) on sys.path, plus standard dist-info. Rebuilding with
+/// `zig build` / `pyoz develop` is picked up without reinstalling, and the
+/// install is visible to `pip list` / removable with `pip uninstall`.
+pub fn buildEditableWheel(ctx: Ctx, out_dir: []const u8) ![]const u8 {
+    const allocator = ctx.gpa;
+    const io = ctx.io;
+    const cwd = Io.Dir.cwd();
 
-    // Get macOS version using Python's platform module
-    const python_cmd = builder.getPythonCommand();
-    const result = builder.runCommand(allocator, &.{
-        python_cmd, "-c", "import platform; print(platform.mac_ver()[0])",
-    }) catch {
-        // Fallback to safe defaults if detection fails
-        return if (builtin.cpu.arch == .aarch64) "macosx_11_0_arm64" else "macosx_10_9_x86_64";
-    };
-    defer allocator.free(result);
+    var config = try project.toml.loadPyProject(allocator, io);
+    defer config.deinit(allocator);
 
-    const version_str = std.mem.trim(u8, result, &std.ascii.whitespace);
+    var build_result = try builder.buildModule(ctx, .{});
+    defer build_result.deinit(allocator);
 
-    // Parse version (e.g., "14.5" or "13.2.1")
-    var major: u32 = 10;
-    var minor: u32 = 9;
+    const is_package_mode = for (config.py_packages.items) |pkg| {
+        if (std.mem.eql(u8, pkg, config.name)) break true;
+    } else false;
 
-    var parts = std.mem.splitScalar(u8, version_str, '.');
-    if (parts.next()) |major_str| {
-        major = std.fmt.parseInt(u32, major_str, 10) catch 10;
+    // Package layout: the extension lives inside the package directory
+    // (`from ._mod import *`), so link it there; rebuilds update the link.
+    if (is_package_mode) {
+        const src_candidate = try std.fmt.allocPrint(allocator, "src/{s}", .{config.name});
+        defer allocator.free(src_candidate);
+        const pkg_root = if (sys.exists(io, src_candidate)) "src/" else "";
+        const in_pkg = try std.fmt.allocPrint(allocator, "{s}{s}/{s}", .{ pkg_root, config.name, build_result.module_name });
+        defer allocator.free(in_pkg);
+        var abs_buf: [Io.Dir.max_path_bytes]u8 = undefined;
+        const abs_built = abs_buf[0..try cwd.realPathFile(io, build_result.module_path, &abs_buf)];
+        cwd.deleteFile(io, in_pkg) catch {};
+        if (builtin.os.tag == .windows) {
+            try cwd.copyFile(build_result.module_path, cwd, in_pkg, io, .{});
+        } else {
+            try cwd.symLink(io, abs_built, in_pkg, .{});
+        }
     }
-    if (parts.next()) |minor_str| {
-        minor = std.fmt.parseInt(u32, minor_str, 10) catch 9;
+
+    // Stubs next to the built module, for IDEs using the editable install.
+    if (symreader.extractStubs(io, allocator, build_result.module_path) catch null) |stubs| {
+        defer allocator.free(stubs);
+        const out_dir_rel = Io.Dir.path.dirname(build_result.module_path) orelse ".";
+        const pyi = try std.fmt.allocPrint(allocator, "{s}/{s}.pyi", .{ out_dir_rel, config.getModuleName() });
+        defer allocator.free(pyi);
+        cwd.writeFile(io, .{ .sub_path = pyi, .data = stubs }) catch {};
     }
 
-    // Format: macosx_{major}_{minor}_{arch}
-    return try std.fmt.allocPrint(allocator, "macosx_{d}_{d}_{s}", .{ major, minor, arch_str });
+    // .pth lines: absolute directories to add to sys.path.
+    var pth: std.ArrayList(u8) = .empty;
+    defer pth.deinit(allocator);
+    var abs_buf: [Io.Dir.max_path_bytes]u8 = undefined;
+    if (!is_package_mode) {
+        const mod_dir = Io.Dir.path.dirname(build_result.module_path) orelse ".";
+        try pth.print(allocator, "{s}\n", .{abs_buf[0..try cwd.realPathFile(io, mod_dir, &abs_buf)]});
+    }
+    for (config.py_packages.items) |pkg| {
+        const src_pkg = try std.fmt.allocPrint(allocator, "src/{s}", .{pkg});
+        defer allocator.free(src_pkg);
+        const root = if (sys.exists(io, src_pkg)) "src" else ".";
+        const line = abs_buf[0..try cwd.realPathFile(io, root, &abs_buf)];
+        if (std.mem.indexOf(u8, pth.items, line) == null) try pth.print(allocator, "{s}\n", .{line});
+    }
+
+    const dist_name = try normalizeDistName(allocator, config.name);
+    defer allocator.free(dist_name);
+    const version = config.getVersion();
+
+    cwd.createDirPath(io, out_dir) catch {};
+    const wheel_path = try std.fmt.allocPrint(allocator, "{s}/{s}-{s}-py3-none-any.whl", .{ out_dir, dist_name, version });
+    errdefer allocator.free(wheel_path);
+    cwd.deleteFile(io, wheel_path) catch {};
+
+    var z = try zip.ZipWriter.init(allocator, io, wheel_path, .{});
+    defer z.deinit();
+
+    const pth_name = try std.fmt.allocPrint(allocator, "__editable__.{s}-{s}.pth", .{ dist_name, version });
+    defer allocator.free(pth_name);
+    try z.addFile(pth_name, pth.items);
+
+    const dist_info = try std.fmt.allocPrint(allocator, "{s}-{s}.dist-info", .{ dist_name, version });
+    defer allocator.free(dist_info);
+    try addMetadata(allocator, io, &z, dist_info);
+    const wheel_meta_path = try std.fmt.allocPrint(allocator, "{s}/WHEEL", .{dist_info});
+    defer allocator.free(wheel_meta_path);
+    try z.addFile(wheel_meta_path,
+        \\Wheel-Version: 1.0
+        \\Generator: pyoz
+        \\Root-Is-Purelib: true
+        \\Tag: py3-none-any
+        \\
+    );
+    const record_path = try std.fmt.allocPrint(allocator, "{s}/RECORD", .{dist_info});
+    defer allocator.free(record_path);
+    var record: std.ArrayList(u8) = .empty;
+    defer record.deinit(allocator);
+    try z.appendRecord(&record, record_path);
+    try z.addFile(record_path, record.items);
+    try z.finish();
+
+    return wheel_path;
+}
+
+/// Wheel/dist-info names must be normalized: runs of '-', '_' and '.' become a
+/// single '_' and the result is lowercased (PEP 427 / binary distribution format).
+fn normalizeDistName(allocator: std.mem.Allocator, name: []const u8) ![]u8 {
+    var out = try std.ArrayList(u8).initCapacity(allocator, name.len);
+    errdefer out.deinit(allocator);
+    var prev_sep = false;
+    for (name) |c| {
+        if (c == '-' or c == '_' or c == '.') {
+            if (!prev_sep) out.appendAssumeCapacity('_');
+            prev_sep = true;
+        } else {
+            out.appendAssumeCapacity(std.ascii.toLower(c));
+            prev_sep = false;
+        }
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+/// True if `filename` is a wheel for exactly this project name and version.
+/// The "-" after the version keeps "1.0" from matching "1.0.1" wheels.
+fn isWheelFor(allocator: std.mem.Allocator, filename: []const u8, name: []const u8, version: []const u8) !bool {
+    const dist_name = try normalizeDistName(allocator, name);
+    defer allocator.free(dist_name);
+    const prefix = try std.fmt.allocPrint(allocator, "{s}-{s}-", .{ dist_name, version });
+    defer allocator.free(prefix);
+    return std.mem.startsWith(u8, filename, prefix) and std.mem.endsWith(u8, filename, ".whl");
+}
+
+test isWheelFor {
+    const a = std.testing.allocator;
+    try std.testing.expect(try isWheelFor(a, "my_pkg-1.0-cp312-cp312-linux_x86_64.whl", "My-Pkg", "1.0"));
+    try std.testing.expect(try isWheelFor(a, "my_pkg-1.0-cp314-cp314t-linux_x86_64.whl", "my.pkg", "1.0"));
+    try std.testing.expect(!try isWheelFor(a, "my_pkg-1.0.1-cp312-cp312-linux_x86_64.whl", "my-pkg", "1.0"));
+    try std.testing.expect(!try isWheelFor(a, "my_pkg-0.9-cp312-cp312-linux_x86_64.whl", "my-pkg", "1.0"));
+    try std.testing.expect(!try isWheelFor(a, "my_pkg_extra-1.0-cp312-cp312-linux_x86_64.whl", "my-pkg", "1.0"));
+    try std.testing.expect(!try isWheelFor(a, "my_pkg-1.0.tar.gz", "my-pkg", "1.0"));
+}
+
+test normalizeDistName {
+    const n = try normalizeDistName(std.testing.allocator, "My-Cool..Pkg");
+    defer std.testing.allocator.free(n);
+    try std.testing.expectEqualStrings("my_cool_pkg", n);
 }
 
 /// Recursively add files from a package directory to the wheel.
 /// File extensions are filtered by the include-ext config (defaults to .py only).
 fn addPythonPackage(
     allocator: std.mem.Allocator,
+    io: Io,
     z: *zip.ZipWriter,
-    cwd: std.fs.Dir,
+    cwd: Io.Dir,
     pkg_name: []const u8,
-    py_files: *std.ArrayListUnmanaged([]const u8),
+    py_files: *std.ArrayList([]const u8),
     config: *const project.toml.PyProjectConfig,
 ) !void {
     // Try src-layout first (src/<pkg_name>/), then flat layout (<pkg_name>/)
     const src_path = try std.fmt.allocPrint(allocator, "src/{s}", .{pkg_name});
     defer allocator.free(src_path);
 
-    const is_src_layout = blk: {
-        cwd.access(src_path, .{}) catch break :blk false;
-        break :blk true;
-    };
+    const is_src_layout = sys.exists(io, src_path);
     const disk_prefix = if (is_src_layout) src_path else pkg_name;
 
-    var pkg_dir = cwd.openDir(disk_prefix, .{ .iterate = true }) catch |err| {
+    var pkg_dir = cwd.openDir(io, disk_prefix, .{ .iterate = true }) catch |err| {
         std.debug.print("  Warning: Python package directory '{s}' not found (tried 'src/{s}' and '{s}'): {}\n", .{ pkg_name, pkg_name, pkg_name, err });
         return;
     };
-    defer pkg_dir.close();
+    defer pkg_dir.close(io);
 
     var walker = try pkg_dir.walk(allocator);
     defer walker.deinit();
 
-    while (try walker.next()) |entry| {
+    while (try walker.next(io)) |entry| {
         if (entry.kind != .file) continue;
         if (!config.shouldIncludeFile(entry.basename)) continue;
 
-        // Build the in-wheel path: pkg_name/subdir/file.py (always flat in wheel)
+        // Build the in-wheel path: pkg_name/subdir/file.py (always flat in wheel).
+        // ZIP entries must use '/', but the walker yields native separators ('\\' on Windows).
         const wheel_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ pkg_name, entry.path });
+        if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, wheel_path, '\\', '/');
 
         // Build the disk path relative to cwd (may be src/<pkg>/ or <pkg>/)
         const disk_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ disk_prefix, entry.path });
@@ -371,13 +522,15 @@ fn addPythonPackage(
 }
 
 /// Publish wheel(s) to PyPI or TestPyPI
-pub fn publish(allocator: std.mem.Allocator, test_pypi: bool) !void {
+pub fn publish(ctx: Ctx, test_pypi: bool) !void {
+    const allocator = ctx.gpa;
+    const io = ctx.io;
     const repo = if (test_pypi) pypi.Repository.testpypi else pypi.Repository.pypi;
 
     std.debug.print("Publishing to {s}...\n\n", .{repo.name});
 
     // Load project config
-    var config = project.toml.loadPyProject(allocator) catch |err| {
+    var config = project.toml.loadPyProject(allocator, io) catch |err| {
         if (err == error.PyProjectNotFound) {
             std.debug.print("Error: pyproject.toml not found.\n", .{});
             return err;
@@ -387,7 +540,7 @@ pub fn publish(allocator: std.mem.Allocator, test_pypi: bool) !void {
     defer config.deinit(allocator);
 
     // Get credentials
-    const creds = pypi.getCredentials(allocator, repo) catch |err| {
+    const creds = pypi.getCredentials(allocator, ctx.environ, repo) catch |err| {
         if (err == error.NoCredentials) return err;
         return err;
     };
@@ -395,34 +548,44 @@ pub fn publish(allocator: std.mem.Allocator, test_pypi: bool) !void {
     defer allocator.free(creds.password);
 
     // Find wheel files in dist/
-    const cwd = std.fs.cwd();
-    var dist_dir = cwd.openDir("dist", .{ .iterate = true }) catch |err| {
+    var dist_dir = Io.Dir.cwd().openDir(io, "dist", .{ .iterate = true }) catch |err| {
         if (err == error.FileNotFound) {
             std.debug.print("Error: No dist/ directory. Run 'pyoz build' first.\n", .{});
             return error.NoDistDir;
         }
         return err;
     };
-    defer dist_dir.close();
+    defer dist_dir.close(io);
 
     // Collect wheel files
-    var wheels = std.ArrayListUnmanaged([]const u8){};
+    var wheels: std.ArrayList([]const u8) = .empty;
     defer {
         for (wheels.items) |w| allocator.free(w);
         wheels.deinit(allocator);
     }
 
+    // Only upload wheels for *this* name and version: dist/ often still holds
+    // wheels from earlier versions, which PyPI rejects with HTTP 400.
+    var skipped: usize = 0;
     var iter = dist_dir.iterate();
-    while (try iter.next()) |entry| {
-        if (std.mem.endsWith(u8, entry.name, ".whl")) {
-            const wheel_path = try std.fmt.allocPrint(allocator, "dist/{s}", .{entry.name});
-            try wheels.append(allocator, wheel_path);
+    while (try iter.next(io)) |entry| {
+        if (!std.mem.endsWith(u8, entry.name, ".whl")) continue;
+        if (!try isWheelFor(allocator, entry.name, config.name, config.getVersion())) {
+            skipped += 1;
+            continue;
         }
+        const wheel_path = try std.fmt.allocPrint(allocator, "dist/{s}", .{entry.name});
+        try wheels.append(allocator, wheel_path);
     }
 
     if (wheels.items.len == 0) {
-        std.debug.print("Error: No wheel files in dist/. Run 'pyoz build' first.\n", .{});
+        std.debug.print("Error: No wheels for {s} {s} in dist/", .{ config.name, config.getVersion() });
+        if (skipped > 0) std.debug.print(" ({d} wheel(s) for other versions were ignored)", .{skipped});
+        std.debug.print(". Run 'pyoz build' first.\n", .{});
         return error.NoWheels;
+    }
+    if (skipped > 0) {
+        std.debug.print("Ignoring {d} wheel(s) in dist/ that are not {s} {s}\n", .{ skipped, config.name, config.getVersion() });
     }
 
     std.debug.print("Found {d} wheel(s) to upload:\n", .{wheels.items.len});
@@ -433,7 +596,7 @@ pub fn publish(allocator: std.mem.Allocator, test_pypi: bool) !void {
 
     // Upload each wheel
     for (wheels.items) |wheel_path| {
-        try pypi.uploadWheel(allocator, wheel_path, &config, repo, creds.username, creds.password);
+        try pypi.uploadWheel(allocator, io, wheel_path, repo, creds.username, creds.password);
     }
 
     std.debug.print("\nSuccessfully published to {s}!\n", .{repo.name});

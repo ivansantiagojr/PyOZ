@@ -22,8 +22,8 @@ hide:
 ### Python extensions in Zig, made easy
 
 [![GitHub](https://img.shields.io/github/stars/pyozig/PyOZ?style=flat&color=blue)](https://github.com/pyozig/PyOZ)
-[![Python](https://img.shields.io/badge/python-3.8--3.13-blue)](https://www.python.org/)
-[![Zig](https://img.shields.io/badge/zig-0.15+-orange)](https://ziglang.org/)
+[![Python](https://img.shields.io/badge/python-3.10--3.14-blue)](https://www.python.org/)
+[![Zig](https://img.shields.io/badge/zig-0.16-orange)](https://ziglang.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](https://github.com/pyozig/PyOZ/blob/main/LICENSE)
 
 ---
@@ -62,11 +62,14 @@ Build blazing-fast extensions with zero boilerplate and zero Python C API headac
 
     ---
 
-    Classes, magic methods, properties, NumPy arrays, enums, exceptions, and more.
+    Classes, magic methods, properties, NumPy arrays, enums, exceptions, async (`await`), and free-threaded Python.
 
 </div>
 
 ---
+
+!!! tip "Upgrading from 0.12?"
+    PyOZ 0.13 requires Zig 0.16 and Python 3.10+. See [Upgrading to 0.13](upgrading.md).
 
 ## Quick Example
 
@@ -105,7 +108,8 @@ print(mymodule.add(2, 3))  # 5
 | **Compile Time** | :material-check-all:{ .green } Fast | :material-check:{ .orange } Slow | :material-check:{ .lime } Medium |
 | **Cross-Compile** | :material-check-all:{ .green } Built-in | :material-check:{ .orange } Via cross/cargo | :material-check:{ .orange } Complex |
 | **NumPy Support** | :material-check-all:{ .green } Zero-copy | :material-check:{ .lime } Via crate | :material-check-all:{ .green } Native |
-| **Async Support** | :material-close:{ .red } No | :material-check-all:{ .green } Yes | :material-check:{ .orange } Limited |
+| **Async Support** | :material-check-all:{ .green } Yes (`std.Io`) | :material-check-all:{ .green } Yes | :material-check:{ .orange } Limited |
+| **Free-Threading** | :material-check-all:{ .green } Yes (auto-locking) | :material-check-all:{ .green } Yes | :material-check:{ .orange } Experimental |
 | **Ecosystem** | :material-check:{ .orange } Growing | :material-check-all:{ .green } Mature | :material-check-all:{ .green } Mature |
 
 </div>

@@ -48,4 +48,8 @@ pub fn freeOwnedValue(comptime T: type, value: T, allocator: std.mem.Allocator) 
     if (info == .pointer and info.pointer.size == .slice) {
         allocator.free(value);
     }
+    // pyoz.Decimal wraps a string slice: Owned(Decimal) owns that string.
+    if (info == .@"struct" and @hasDecl(T, "_is_pyoz_decimal")) {
+        allocator.free(value.value);
+    }
 }

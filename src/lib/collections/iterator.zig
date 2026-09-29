@@ -243,12 +243,7 @@ pub fn LazyIteratorWrapper(comptime T: type, comptime State: type) type {
             var obj: py.PyTypeObject = std.mem.zeroes(py.PyTypeObject);
 
             // Basic setup - handle refcnt field difference across Python versions
-            if (comptime @hasField(py.c.PyObject, "ob_refcnt")) {
-                obj.ob_base.ob_base.ob_refcnt = 1;
-            } else {
-                const ob_ptr: *py.Py_ssize_t = @ptrCast(&obj.ob_base.ob_base);
-                ob_ptr.* = 1;
-            }
+            py.types.initStaticHeader(&obj.ob_base.ob_base);
 
             obj.tp_name = "pyoz_iterator";
             obj.tp_basicsize = @sizeOf(PyIterWrapper);

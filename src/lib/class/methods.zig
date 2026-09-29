@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const py = @import("../python.zig");
+const ft = @import("threading.zig");
 const conversion = @import("../conversion.zig");
 const Path = conversion.Path;
 
@@ -14,6 +15,9 @@ const class_mod = @import("mod.zig");
 const ClassInfo = class_mod.ClassInfo;
 const source_parser = @import("../source_parser.zig");
 const errors_mod = @import("../errors.zig");
+const awaitable = @import("../awaitable.zig");
+const async_mod = @import("async.zig");
+const wrappers_mod = @import("../wrappers.zig");
 
 /// Build method wrappers for a given type
 pub fn MethodBuilder(comptime class_name: [*:0]const u8, comptime T: type, comptime PyWrapper: type, comptime class_infos: []const ClassInfo, comptime slot_dunders: []const []const u8) type {
@@ -181,6 +185,29 @@ pub fn MethodBuilder(comptime class_name: [*:0]const u8, comptime T: type, compt
             return FirstParam == type;
         }
 
+        const Kind = enum { instance, static, class };
+
+        /// Index of the first Python-visible parameter (after `self` / `cls`).
+        fn firstVisible(comptime kind: Kind) usize {
+            return if (kind == .static) 0 else 1;
+        }
+
+        /// Whether a method takes keyword arguments through `pyoz.Args(S)`,
+        /// which must then be its only Python-visible parameter.
+        fn takesArgs(comptime method_name: []const u8, comptime kind: Kind) bool {
+            const params = @typeInfo(@TypeOf(@field(T, method_name))).@"fn".params;
+            const first = firstVisible(kind);
+            for (params[first..], first..) |p, i| {
+                if (wrappers_mod.isArgs(p.type.?)) {
+                    if (i != first or params.len != first + 1) @compileError(@typeName(T) ++ "." ++ method_name ++
+                        ": pyoz.Args(...) must be the only parameter" ++ (if (kind == .static) "" else " after `" ++ (if (kind == .class) "cls" else "self") ++ "`") ++
+                        "; put the other parameters in the Args struct");
+                    return true;
+                }
+            }
+            return false;
+        }
+
         // ====================================================================
         // Docstring helpers
         // ====================================================================
@@ -232,15 +259,19 @@ pub fn MethodBuilder(comptime class_name: [*:0]const u8, comptime T: type, compt
             // Add instance methods
             for (decls) |decl| {
                 if (isInstanceMethod(decl.name)) {
+                    const kw = takesArgs(decl.name, .instance);
                     m[idx] = .{
                         .ml_name = @ptrCast(decl.name.ptr),
-                        .ml_meth = @ptrCast(generateMethodWrapper(decl.name)),
-                        .ml_flags = py.METH_VARARGS,
+                        .ml_meth = if (kw)
+                            @ptrCast(ft.locked(T, generateKeywordWrapper(decl.name, .instance)))
+                        else
+                            @ptrCast(ft.locked(T, generateMethodWrapper(decl.name))),
+                        .ml_flags = py.METH_VARARGS | (if (kw) py.METH_KEYWORDS else 0),
                         .ml_doc = stubs_mod.buildMlDoc(
                             decl.name,
                             @TypeOf(@field(T, decl.name)),
                             .instance_method,
-                            .positional,
+                            if (kw) .args_struct else .positional,
                             getMethodDoc(decl.name),
                             getMethodParams(decl.name),
                         ),
@@ -252,15 +283,19 @@ pub fn MethodBuilder(comptime class_name: [*:0]const u8, comptime T: type, compt
             // Add static methods
             for (decls) |decl| {
                 if (isStaticMethod(decl.name)) {
+                    const kw = takesArgs(decl.name, .static);
                     m[idx] = .{
                         .ml_name = @ptrCast(decl.name.ptr),
-                        .ml_meth = @ptrCast(generateStaticMethodWrapper(decl.name)),
-                        .ml_flags = py.METH_VARARGS | py.METH_STATIC,
+                        .ml_meth = if (kw)
+                            @ptrCast(generateKeywordWrapper(decl.name, .static))
+                        else
+                            @ptrCast(generateStaticMethodWrapper(decl.name)),
+                        .ml_flags = py.METH_VARARGS | py.METH_STATIC | (if (kw) py.METH_KEYWORDS else 0),
                         .ml_doc = stubs_mod.buildMlDoc(
                             decl.name,
                             @TypeOf(@field(T, decl.name)),
                             .static_method,
-                            .positional,
+                            if (kw) .args_struct else .positional,
                             getMethodDoc(decl.name),
                             getMethodParams(decl.name),
                         ),
@@ -272,15 +307,19 @@ pub fn MethodBuilder(comptime class_name: [*:0]const u8, comptime T: type, compt
             // Add class methods
             for (decls) |decl| {
                 if (isClassMethod(decl.name)) {
+                    const kw = takesArgs(decl.name, .class);
                     m[idx] = .{
                         .ml_name = @ptrCast(decl.name.ptr),
-                        .ml_meth = @ptrCast(generateClassMethodWrapper(decl.name)),
-                        .ml_flags = py.METH_VARARGS | py.METH_CLASS,
+                        .ml_meth = if (kw)
+                            @ptrCast(generateKeywordWrapper(decl.name, .class))
+                        else
+                            @ptrCast(generateClassMethodWrapper(decl.name)),
+                        .ml_flags = py.METH_VARARGS | py.METH_CLASS | (if (kw) py.METH_KEYWORDS else 0),
                         .ml_doc = stubs_mod.buildMlDoc(
                             decl.name,
                             @TypeOf(@field(T, decl.name)),
                             .class_method,
-                            .positional,
+                            if (kw) .args_struct else .positional,
                             getMethodDoc(decl.name),
                             getMethodParams(decl.name),
                         ),
@@ -327,7 +366,7 @@ pub fn MethodBuilder(comptime class_name: [*:0]const u8, comptime T: type, compt
             defer py.c.Py_DecRef(types_mod);
 
             const ga_type = py.c.PyObject_GetAttrString(types_mod, "GenericAlias") orelse {
-                // Python 3.8: GenericAlias doesn't exist, return cls
+                // Defensive: types.GenericAlias exists on every supported version (3.10+)
                 py.c.PyErr_Clear();
                 py.Py_IncRef(cls_obj);
                 return cls_obj;
@@ -346,6 +385,93 @@ pub fn MethodBuilder(comptime class_name: [*:0]const u8, comptime T: type, compt
                 py.Py_IncRef(cls_obj);
                 return cls_obj;
             };
+        }
+
+        // ====================================================================
+        // Result conversion (shared by all method wrappers)
+        // ====================================================================
+
+        /// Convert a method's return value to a new Python reference, or null
+        /// with an exception set. Errors map to exceptions unless Python already
+        /// set one (e.g. KeyboardInterrupt from checkSignals); a null optional
+        /// is None unless an exception is pending.
+        fn plainResult(comptime R: type, result: R) ?*py.PyObject {
+            const Conv = conversion.Converter(class_infos);
+            switch (@typeInfo(R)) {
+                .error_union => {
+                    const value = result catch |err| {
+                        if (py.PyErr_Occurred() == null) {
+                            const msg = @errorName(err);
+                            py.PyErr_SetString(errors_mod.mapWellKnownError(msg), msg.ptr);
+                        }
+                        return null;
+                    };
+                    return Conv.toPy(@TypeOf(value), value);
+                },
+                .optional => {
+                    if (result) |value| return Conv.toPy(@TypeOf(value), value);
+                    if (py.PyErr_Occurred() != null) return null;
+                    return py.Py_RETURN_NONE();
+                },
+                .void => return py.Py_RETURN_NONE(),
+                else => return Conv.toPy(R, result),
+            }
+        }
+
+        /// `plainResult` for instance methods, plus the `return self` pattern
+        /// (a `*T` equal to self returns the same Python object) and the
+        /// awaitables `__aenter__` / `__aexit__` must return.
+        fn instanceResult(comptime method_name: []const u8, comptime R: type, result: R, self_obj: *py.PyObject, self_data: *T) ?*py.PyObject {
+            if (comptime async_mod.isAsyncMethodDunder(method_name)) {
+                return awaitable.toAwaitable(conversion.Converter(class_infos), T, R, result, .value, self_obj, self_data);
+            }
+            const info = @typeInfo(R);
+            if (info == .error_union) {
+                const value = result catch |err| return plainResult(R, err);
+                return instanceResult(method_name, info.error_union.payload, value, self_obj, self_data);
+            }
+            // Only single-item pointers (*T / *const T), not slices ([]T)
+            if (info == .pointer and info.pointer.size == .one and info.pointer.child == T) {
+                const ptr: *const T = result;
+                if (ptr == self_data) {
+                    py.Py_IncRef(self_obj);
+                    return self_obj;
+                }
+            }
+            return plainResult(R, result);
+        }
+
+        // ====================================================================
+        // Keyword-argument wrapper generation (methods taking pyoz.Args(S))
+        // ====================================================================
+
+        fn generateKeywordWrapper(comptime method_name: []const u8, comptime kind: Kind) wrappers_mod.PyCFunctionWithKeywords {
+            const method = @field(T, method_name);
+            const fn_info = @typeInfo(@TypeOf(method)).@"fn";
+            const ArgsWrapper = fn_info.params[firstVisible(kind)].type.?;
+            const ArgsStruct = ArgsWrapper.ArgsStruct;
+            const RawReturnType = fn_info.return_type orelse void;
+            const ReturnType = unwrapSignature(RawReturnType);
+
+            return struct {
+                fn wrapper(self_obj: ?*py.PyObject, args: ?*py.PyObject, kwargs: ?*py.PyObject) callconv(.c) ?*py.PyObject {
+                    var parsed = wrappers_mod.parseNamedArgs(ArgsStruct, class_infos, method_name, args, kwargs) orelse return null;
+                    defer wrappers_mod.releaseNamedArgs(ArgsStruct, &parsed);
+                    const named: ArgsWrapper = .{ .value = parsed };
+
+                    switch (kind) {
+                        .instance => {
+                            const self: *PyWrapper = @ptrCast(@alignCast(self_obj orelse return null));
+                            const data = self.getData();
+                            // `self` may be taken by value (T) or by pointer (*T / *const T)
+                            const raw = if (fn_info.params[0].type.? == T) method(data.*, named) else method(data, named);
+                            return instanceResult(method_name, ReturnType, unwrapSignatureValue(RawReturnType, raw), self_obj.?, data);
+                        },
+                        .static => return plainResult(ReturnType, unwrapSignatureValue(RawReturnType, method(named))),
+                        .class => return plainResult(ReturnType, unwrapSignatureValue(RawReturnType, method(T, named))),
+                    }
+                }
+            }.wrapper;
         }
 
         // ====================================================================
@@ -379,8 +505,7 @@ pub fn MethodBuilder(comptime class_name: [*:0]const u8, comptime T: type, compt
                     const raw_result = callMethod(self.getData(), extra_args);
                     const result = unwrapSignatureValue(RawReturnType, raw_result);
 
-                    // Handle return - pass self_obj for potential "return self" pattern
-                    return handleReturn(result, self_obj.?, self.getData());
+                    return instanceResult(method_name, ReturnType, result, self_obj.?, self.getData());
                 }
 
                 fn releasePathArgs(extra_args: *ExtraArgsTuple()) void {
@@ -436,62 +561,6 @@ pub fn MethodBuilder(comptime class_name: [*:0]const u8, comptime T: type, compt
                         return @call(.auto, method, .{self_ptr} ++ extra);
                     }
                 }
-
-                fn handleReturn(result: ReturnType, self_obj: *py.PyObject, self_data: *T) ?*py.PyObject {
-                    const rt_info = @typeInfo(ReturnType);
-                    // Use self-aware converter so we can return instances of T
-                    const Conv = conversion.Converter(class_infos);
-
-                    // Check if return type is pointer to T (return self pattern)
-                    // Only match single-item pointers (*T / *const T), not slices ([]T)
-                    if (rt_info == .pointer) {
-                        const ptr_info = rt_info.pointer;
-                        if (ptr_info.size == .one and ptr_info.child == T) {
-                            // Method returned *T or *const T - check if it's self
-                            const result_ptr: *const T = if (ptr_info.is_const) result else result;
-                            if (result_ptr == self_data) {
-                                // Return self with incremented refcount
-                                py.Py_IncRef(self_obj);
-                                return self_obj;
-                            }
-                        }
-                    }
-
-                    if (rt_info == .error_union) {
-                        if (result) |value| {
-                            const ValueType = @TypeOf(value);
-                            const val_info = @typeInfo(ValueType);
-                            // Check for pointer to T in error union (single-item only, not slices)
-                            if (val_info == .pointer and val_info.pointer.size == .one and val_info.pointer.child == T) {
-                                const result_ptr: *const T = if (val_info.pointer.is_const) value else value;
-                                if (result_ptr == self_data) {
-                                    py.Py_IncRef(self_obj);
-                                    return self_obj;
-                                }
-                            }
-                            return Conv.toPy(ValueType, value);
-                        } else |err| {
-                            // Don't overwrite an exception already set by Python
-                            // (e.g., KeyboardInterrupt from checkSignals)
-                            if (py.PyErr_Occurred() == null) {
-                                const msg = @errorName(err);
-                                py.PyErr_SetString(errors_mod.mapWellKnownError(msg), msg.ptr);
-                            }
-                            return null;
-                        }
-                    } else if (rt_info == .optional) {
-                        if (result) |value| {
-                            return Conv.toPy(@TypeOf(value), value);
-                        } else {
-                            if (py.PyErr_Occurred() != null) return null;
-                            return py.Py_RETURN_NONE();
-                        }
-                    } else if (ReturnType == void) {
-                        return py.Py_RETURN_NONE();
-                    } else {
-                        return Conv.toPy(ReturnType, result);
-                    }
-                }
             }.wrapper;
         }
 
@@ -530,7 +599,7 @@ pub fn MethodBuilder(comptime class_name: [*:0]const u8, comptime T: type, compt
                     const result = unwrapSignatureValue(@TypeOf(raw_result), raw_result);
 
                     // Handle return
-                    return handleReturn(result);
+                    return plainResult(ReturnType, result);
                 }
 
                 fn releasePathArgs(zig_args: *ArgsTuple()) void {
@@ -573,34 +642,6 @@ pub fn MethodBuilder(comptime class_name: [*:0]const u8, comptime T: type, compt
                     }
                     return std.meta.Tuple(&types);
                 }
-
-                fn handleReturn(result: ReturnType) ?*py.PyObject {
-                    const rt_info = @typeInfo(ReturnType);
-                    if (rt_info == .error_union) {
-                        if (result) |value| {
-                            return Conv.toPy(@TypeOf(value), value);
-                        } else |err| {
-                            // Don't overwrite an exception already set by Python
-                            // (e.g., KeyboardInterrupt from checkSignals)
-                            if (py.PyErr_Occurred() == null) {
-                                const msg = @errorName(err);
-                                py.PyErr_SetString(errors_mod.mapWellKnownError(msg), msg.ptr);
-                            }
-                            return null;
-                        }
-                    } else if (rt_info == .optional) {
-                        if (result) |value| {
-                            return Conv.toPy(@TypeOf(value), value);
-                        } else {
-                            if (py.PyErr_Occurred() != null) return null;
-                            return py.Py_RETURN_NONE();
-                        }
-                    } else if (ReturnType == void) {
-                        return py.Py_RETURN_NONE();
-                    } else {
-                        return Conv.toPy(ReturnType, result);
-                    }
-                }
             }.wrapper;
         }
 
@@ -640,7 +681,7 @@ pub fn MethodBuilder(comptime class_name: [*:0]const u8, comptime T: type, compt
                     const result = unwrapSignatureValue(@TypeOf(raw_result), raw_result);
 
                     // Handle return
-                    return handleReturn(result);
+                    return plainResult(ReturnType, result);
                 }
 
                 fn releasePathArgs(zig_args: *ArgsTuple()) void {
@@ -684,34 +725,6 @@ pub fn MethodBuilder(comptime class_name: [*:0]const u8, comptime T: type, compt
                         types[i - 1] = params[i].type.?;
                     }
                     return std.meta.Tuple(&types);
-                }
-
-                fn handleReturn(result: ReturnType) ?*py.PyObject {
-                    const rt_info = @typeInfo(ReturnType);
-                    if (rt_info == .error_union) {
-                        if (result) |value| {
-                            return Conv.toPy(@TypeOf(value), value);
-                        } else |err| {
-                            // Don't overwrite an exception already set by Python
-                            // (e.g., KeyboardInterrupt from checkSignals)
-                            if (py.PyErr_Occurred() == null) {
-                                const msg = @errorName(err);
-                                py.PyErr_SetString(errors_mod.mapWellKnownError(msg), msg.ptr);
-                            }
-                            return null;
-                        }
-                    } else if (rt_info == .optional) {
-                        if (result) |value| {
-                            return Conv.toPy(@TypeOf(value), value);
-                        } else {
-                            if (py.PyErr_Occurred() != null) return null;
-                            return py.Py_RETURN_NONE();
-                        }
-                    } else if (ReturnType == void) {
-                        return py.Py_RETURN_NONE();
-                    } else {
-                        return Conv.toPy(ReturnType, result);
-                    }
                 }
             }.wrapper;
         }

@@ -12,7 +12,7 @@ const PyObject = py.PyObject;
 pub const bases = struct {
     /// Base: object (default, usually not needed)
     pub fn object() ?*PyTypeObject {
-        return @ptrCast(&py.c.PyBaseObject_Type);
+        return py.types.typeObject("PyBaseObject_Type");
     }
 
     /// Base: Exception
@@ -37,37 +37,37 @@ pub const bases = struct {
 
     /// Base: list
     pub fn list() ?*PyTypeObject {
-        return @ptrCast(&py.c.PyList_Type);
+        return py.types.typeObject("PyList_Type");
     }
 
     /// Base: dict
     pub fn dict() ?*PyTypeObject {
-        return @ptrCast(&py.c.PyDict_Type);
+        return py.types.typeObject("PyDict_Type");
     }
 
     /// Base: set
     pub fn set() ?*PyTypeObject {
-        return @ptrCast(&py.c.PySet_Type);
+        return py.types.typeObject("PySet_Type");
     }
 
     /// Base: tuple
     pub fn tuple() ?*PyTypeObject {
-        return @ptrCast(&py.c.PyTuple_Type);
+        return py.types.typeObject("PyTuple_Type");
     }
 
     /// Base: str
     pub fn str() ?*PyTypeObject {
-        return @ptrCast(&py.c.PyUnicode_Type);
+        return py.types.typeObject("PyUnicode_Type");
     }
 
     /// Base: int
     pub fn int() ?*PyTypeObject {
-        return @ptrCast(&py.c.PyLong_Type);
+        return py.types.typeObject("PyLong_Type");
     }
 
     /// Base: float
     pub fn float() ?*PyTypeObject {
-        return @ptrCast(&py.c.PyFloat_Type);
+        return py.types.typeObject("PyFloat_Type");
     }
 };
 

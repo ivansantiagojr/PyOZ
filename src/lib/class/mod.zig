@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const py = @import("../python.zig");
+const ft = @import("threading.zig");
 const conversion = @import("../conversion.zig");
 const abi = @import("../abi.zig");
 const slots = @import("../python/slots.zig");
@@ -22,6 +23,7 @@ const mapping_mod = @import("mapping.zig");
 const comparison_mod = @import("comparison.zig");
 const repr_mod = @import("repr.zig");
 const iterator_mod = @import("iterator.zig");
+const async_mod = @import("async.zig");
 const buffer_mod = @import("buffer.zig");
 const descriptor_mod = @import("descriptor.zig");
 const attributes_mod = @import("attributes.zig");
@@ -136,6 +138,14 @@ fn buildSlotDunderList(comptime T: type, comptime num: anytype, comptime seq: an
         if (@hasDecl(T, "__next__")) {
             names[count] = "__next__";
             count += 1;
+        }
+
+        // Async — tp_as_async (am_await, am_aiter, am_anext)
+        for (async_mod.slot_dunders) |n| {
+            if (@hasDecl(T, n)) {
+                names[count] = n;
+                count += 1;
+            }
         }
 
         // Buffer — bf_getbuffer
@@ -444,6 +454,7 @@ fn generateClass(comptime name: [*:0]const u8, comptime T: type, comptime class_
         const cmp = comparison_mod.ComparisonProtocol(T, Self, class_infos);
         const repr = repr_mod.ReprProtocol(name, T, Self, class_infos);
         const iter = iterator_mod.IteratorProtocol(name, T, Self, class_infos);
+        const asy = async_mod.AsyncProtocol(T, Self, class_infos);
         const buf = buffer_mod.BufferProtocol(T, Self);
         const desc = descriptor_mod.DescriptorProtocol(name, T, Self, class_infos);
         const attr = attributes_mod.AttributeProtocol(name, T, Self, class_infos);
@@ -528,13 +539,7 @@ fn generateClass(comptime name: [*:0]const u8, comptime T: type, comptime class_
             var obj: py.PyTypeObject = std.mem.zeroes(py.PyTypeObject);
 
             // Basic setup
-            if (comptime @hasField(py.c.PyObject, "ob_refcnt")) {
-                obj.ob_base.ob_base.ob_refcnt = 1;
-            } else {
-                const ob_ptr: *py.Py_ssize_t = @ptrCast(&obj.ob_base.ob_base);
-                ob_ptr.* = 1;
-            }
-            obj.ob_base.ob_base.ob_type = null;
+            py.types.initStaticHeader(&obj.ob_base.ob_base);
             obj.tp_name = name;
             obj.tp_basicsize = if (is_builtin_subclass) 0 else @sizeOf(PyWrapper);
             obj.tp_itemsize = 0;
@@ -580,7 +585,7 @@ fn generateClass(comptime name: [*:0]const u8, comptime T: type, comptime class_
             // Lifecycle slots
             if (!is_builtin_subclass) {
                 obj.tp_new = @ptrCast(&lifecycle.py_new);
-                obj.tp_init = @ptrCast(&lifecycle.py_init);
+                obj.tp_init = @ptrCast(ft.locked(T, lifecycle.py_init));
                 obj.tp_dealloc = @ptrCast(&lifecycle.py_dealloc);
             }
 
@@ -595,25 +600,25 @@ fn generateClass(comptime name: [*:0]const u8, comptime T: type, comptime class_
 
             // Repr protocol
             if (@hasDecl(T, "__repr__")) {
-                obj.tp_repr = @ptrCast(&repr.py_magic_repr);
+                obj.tp_repr = @ptrCast(ft.locked(T, repr.py_magic_repr));
             } else {
-                obj.tp_repr = @ptrCast(&repr.py_repr);
+                obj.tp_repr = @ptrCast(ft.locked(T, repr.py_repr));
             }
 
             if (@hasDecl(T, "__str__")) {
-                obj.tp_str = @ptrCast(&repr.py_magic_str);
+                obj.tp_str = @ptrCast(ft.locked(T, repr.py_magic_str));
             }
 
             // Comparison protocol
             if (@hasDecl(T, "__eq__") or @hasDecl(T, "__ne__") or @hasDecl(T, "__lt__") or
                 @hasDecl(T, "__le__") or @hasDecl(T, "__gt__") or @hasDecl(T, "__ge__"))
             {
-                obj.tp_richcompare = @ptrCast(&cmp.py_richcompare);
+                obj.tp_richcompare = @ptrCast(ft.locked2(T, cmp.py_richcompare));
             }
 
             // Hash
             if (@hasDecl(T, "__hash__")) {
-                obj.tp_hash = @ptrCast(&repr.py_hash);
+                obj.tp_hash = @ptrCast(ft.locked(T, repr.py_hash));
             } else if (@hasDecl(T, "__eq__")) {
                 // Python semantics: defining __eq__ without __hash__ makes the type unhashable
                 obj.tp_hash = py.c.PyObject_HashNotImplemented;
@@ -636,11 +641,16 @@ fn generateClass(comptime name: [*:0]const u8, comptime T: type, comptime class_
 
             // Iterator protocol
             if (@hasDecl(T, "__iter__")) {
-                obj.tp_iter = @ptrCast(&iter.py_iter);
+                obj.tp_iter = @ptrCast(ft.locked(T, iter.py_iter));
             }
 
             if (@hasDecl(T, "__next__")) {
-                obj.tp_iternext = @ptrCast(&iter.py_iternext);
+                obj.tp_iternext = @ptrCast(ft.locked(T, iter.py_iternext));
+            }
+
+            // Async protocol
+            if (asy.hasAsyncMethods()) {
+                obj.tp_as_async = &asy.async_methods;
             }
 
             // Buffer protocol
@@ -650,33 +660,33 @@ fn generateClass(comptime name: [*:0]const u8, comptime T: type, comptime class_
 
             // Descriptor protocol
             if (@hasDecl(T, "__get__")) {
-                obj.tp_descr_get = @ptrCast(&desc.py_descr_get);
+                obj.tp_descr_get = @ptrCast(ft.locked(T, desc.py_descr_get));
             }
             if (@hasDecl(T, "__set__") or @hasDecl(T, "__delete__")) {
-                obj.tp_descr_set = @ptrCast(&desc.py_descr_set);
+                obj.tp_descr_set = @ptrCast(ft.locked(T, desc.py_descr_set));
             }
 
             // Callable protocol
             if (@hasDecl(T, "__call__")) {
-                obj.tp_call = @ptrCast(&call.py_call);
+                obj.tp_call = @ptrCast(ft.locked(T, call.py_call));
             }
 
             // Attribute access
             if (@hasDecl(T, "__getattr__")) {
-                obj.tp_getattro = @ptrCast(&attr.py_getattro);
+                obj.tp_getattro = @ptrCast(ft.locked(T, attr.py_getattro));
             } else if (has_dict_support) {
                 obj.tp_getattro = py.c.PyObject_GenericGetAttr;
             }
 
             if (@hasDecl(T, "__setattr__") or @hasDecl(T, "__delattr__")) {
-                obj.tp_setattro = @ptrCast(&attr.py_setattro);
+                obj.tp_setattro = @ptrCast(ft.locked(T, attr.py_setattro));
             } else if (has_dict_support) {
                 obj.tp_setattro = py.c.PyObject_GenericSetAttr;
             }
 
             // Frozen classes
             if (attr.isFrozen()) {
-                obj.tp_setattro = @ptrCast(&attr.py_frozen_setattro);
+                obj.tp_setattro = @ptrCast(ft.locked(T, attr.py_frozen_setattro));
             }
 
             // GC support
@@ -773,6 +783,7 @@ fn generateClass(comptime name: [*:0]const u8, comptime T: type, comptime class_
             count += num.slotCount();
             count += seq.slotCount();
             count += map.slotCount();
+            count += asy.slotCount();
 
             // Sentinel
             count += 1;
@@ -797,7 +808,7 @@ fn generateClass(comptime name: [*:0]const u8, comptime T: type, comptime class_
             if (!is_builtin_subclass) {
                 slot_array[idx] = .{ .slot = slots.tp_new, .pfunc = @ptrCast(@constCast(&lifecycle.py_new)) };
                 idx += 1;
-                slot_array[idx] = .{ .slot = slots.tp_init, .pfunc = @ptrCast(@constCast(&lifecycle.py_init)) };
+                slot_array[idx] = .{ .slot = slots.tp_init, .pfunc = @ptrCast(@constCast(ft.locked(T, lifecycle.py_init))) };
                 idx += 1;
                 slot_array[idx] = .{ .slot = slots.tp_dealloc, .pfunc = @ptrCast(@constCast(&lifecycle.py_dealloc)) };
                 idx += 1;
@@ -833,14 +844,14 @@ fn generateClass(comptime name: [*:0]const u8, comptime T: type, comptime class_
 
             // Repr protocol
             if (@hasDecl(T, "__repr__")) {
-                slot_array[idx] = .{ .slot = slots.tp_repr, .pfunc = @ptrCast(@constCast(&repr.py_magic_repr)) };
+                slot_array[idx] = .{ .slot = slots.tp_repr, .pfunc = @ptrCast(@constCast(ft.locked(T, repr.py_magic_repr))) };
             } else {
-                slot_array[idx] = .{ .slot = slots.tp_repr, .pfunc = @ptrCast(@constCast(&repr.py_repr)) };
+                slot_array[idx] = .{ .slot = slots.tp_repr, .pfunc = @ptrCast(@constCast(ft.locked(T, repr.py_repr))) };
             }
             idx += 1;
 
             if (@hasDecl(T, "__str__")) {
-                slot_array[idx] = .{ .slot = slots.tp_str, .pfunc = @ptrCast(@constCast(&repr.py_magic_str)) };
+                slot_array[idx] = .{ .slot = slots.tp_str, .pfunc = @ptrCast(@constCast(ft.locked(T, repr.py_magic_str))) };
                 idx += 1;
             }
 
@@ -848,49 +859,49 @@ fn generateClass(comptime name: [*:0]const u8, comptime T: type, comptime class_
             if (@hasDecl(T, "__eq__") or @hasDecl(T, "__ne__") or @hasDecl(T, "__lt__") or
                 @hasDecl(T, "__le__") or @hasDecl(T, "__gt__") or @hasDecl(T, "__ge__"))
             {
-                slot_array[idx] = .{ .slot = slots.tp_richcompare, .pfunc = @ptrCast(@constCast(&cmp.py_richcompare)) };
+                slot_array[idx] = .{ .slot = slots.tp_richcompare, .pfunc = @ptrCast(@constCast(ft.locked2(T, cmp.py_richcompare))) };
                 idx += 1;
             }
 
             // Hash
             if (@hasDecl(T, "__hash__")) {
-                slot_array[idx] = .{ .slot = slots.tp_hash, .pfunc = @ptrCast(@constCast(&repr.py_hash)) };
+                slot_array[idx] = .{ .slot = slots.tp_hash, .pfunc = @ptrCast(@constCast(ft.locked(T, repr.py_hash))) };
                 idx += 1;
             } else if (@hasDecl(T, "__eq__")) {
                 // Python semantics: defining __eq__ without __hash__ makes the type unhashable
-                slot_array[idx] = .{ .slot = slots.tp_hash, .pfunc = @ptrCast(py.c.PyObject_HashNotImplemented) };
+                slot_array[idx] = .{ .slot = slots.tp_hash, .pfunc = @ptrCast(@constCast(&py.c.PyObject_HashNotImplemented)) };
                 idx += 1;
             }
 
             // Iterator protocol
             if (@hasDecl(T, "__iter__")) {
-                slot_array[idx] = .{ .slot = slots.tp_iter, .pfunc = @ptrCast(@constCast(&iter.py_iter)) };
+                slot_array[idx] = .{ .slot = slots.tp_iter, .pfunc = @ptrCast(@constCast(ft.locked(T, iter.py_iter))) };
                 idx += 1;
             }
             if (@hasDecl(T, "__next__")) {
-                slot_array[idx] = .{ .slot = slots.tp_iternext, .pfunc = @ptrCast(@constCast(&iter.py_iternext)) };
+                slot_array[idx] = .{ .slot = slots.tp_iternext, .pfunc = @ptrCast(@constCast(ft.locked(T, iter.py_iternext))) };
                 idx += 1;
             }
 
             // Descriptor protocol
             if (@hasDecl(T, "__get__")) {
-                slot_array[idx] = .{ .slot = slots.tp_descr_get, .pfunc = @ptrCast(@constCast(&desc.py_descr_get)) };
+                slot_array[idx] = .{ .slot = slots.tp_descr_get, .pfunc = @ptrCast(@constCast(ft.locked(T, desc.py_descr_get))) };
                 idx += 1;
             }
             if (@hasDecl(T, "__set__") or @hasDecl(T, "__delete__")) {
-                slot_array[idx] = .{ .slot = slots.tp_descr_set, .pfunc = @ptrCast(@constCast(&desc.py_descr_set)) };
+                slot_array[idx] = .{ .slot = slots.tp_descr_set, .pfunc = @ptrCast(@constCast(ft.locked(T, desc.py_descr_set))) };
                 idx += 1;
             }
 
             // Callable protocol
             if (@hasDecl(T, "__call__")) {
-                slot_array[idx] = .{ .slot = slots.tp_call, .pfunc = @ptrCast(@constCast(&call.py_call)) };
+                slot_array[idx] = .{ .slot = slots.tp_call, .pfunc = @ptrCast(@constCast(ft.locked(T, call.py_call))) };
                 idx += 1;
             }
 
             // Attribute access
             if (@hasDecl(T, "__getattr__")) {
-                slot_array[idx] = .{ .slot = slots.tp_getattro, .pfunc = @ptrCast(@constCast(&attr.py_getattro)) };
+                slot_array[idx] = .{ .slot = slots.tp_getattro, .pfunc = @ptrCast(@constCast(ft.locked(T, attr.py_getattro))) };
                 idx += 1;
             } else if (has_dict_support) {
                 slot_array[idx] = .{ .slot = slots.tp_getattro, .pfunc = @ptrCast(py.c.PyObject_GenericGetAttr) };
@@ -898,10 +909,10 @@ fn generateClass(comptime name: [*:0]const u8, comptime T: type, comptime class_
             }
 
             if (attr.isFrozen()) {
-                slot_array[idx] = .{ .slot = slots.tp_setattro, .pfunc = @ptrCast(@constCast(&attr.py_frozen_setattro)) };
+                slot_array[idx] = .{ .slot = slots.tp_setattro, .pfunc = @ptrCast(@constCast(ft.locked(T, attr.py_frozen_setattro))) };
                 idx += 1;
             } else if (@hasDecl(T, "__setattr__") or @hasDecl(T, "__delattr__")) {
-                slot_array[idx] = .{ .slot = slots.tp_setattro, .pfunc = @ptrCast(@constCast(&attr.py_setattro)) };
+                slot_array[idx] = .{ .slot = slots.tp_setattro, .pfunc = @ptrCast(@constCast(ft.locked(T, attr.py_setattro))) };
                 idx += 1;
             } else if (has_dict_support) {
                 slot_array[idx] = .{ .slot = slots.tp_setattro, .pfunc = @ptrCast(py.c.PyObject_GenericSetAttr) };
@@ -922,6 +933,7 @@ fn generateClass(comptime name: [*:0]const u8, comptime T: type, comptime class_
             idx += num.addSlots(&slot_array, idx);
             idx += seq.addSlots(&slot_array, idx);
             idx += map.addSlots(&slot_array, idx);
+            idx += asy.addSlots(&slot_array, idx);
 
             // Sentinel
             slot_array[idx] = .{ .slot = 0, .pfunc = null };

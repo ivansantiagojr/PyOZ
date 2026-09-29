@@ -1,35 +1,50 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const version = @import("version");
 pub const toml = @import("toml.zig");
+const sys = @import("sys.zig");
+const Ctx = sys.Ctx;
+const Io = std.Io;
 
 /// Create a new PyOZ project
-pub fn create(allocator: std.mem.Allocator, name_opt: ?[]const u8, in_current_dir: bool, local_pyoz_path: ?[]const u8, package_layout: bool) !void {
-    var project_dir: std.fs.Dir = undefined;
-    var created_dir = false;
+pub fn create(ctx: Ctx, name_opt: ?[]const u8, in_current_dir: bool, local_pyoz_path: ?[]const u8, package_layout: bool) !void {
+    const allocator = ctx.gpa;
+    const io = ctx.io;
+    const cwd = Io.Dir.cwd();
+
     var name: []const u8 = undefined;
     var name_owned = false;
+    defer if (name_owned) allocator.free(name);
 
     if (in_current_dir) {
-        // Use current directory
-        project_dir = std.fs.cwd();
-
         // Get name from argument or directory name
         if (name_opt) |n| {
             name = n;
         } else {
-            var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-            const path = try std.fs.cwd().realpath(".", &path_buf);
-            name = try allocator.dupe(u8, std.fs.path.basename(path));
+            var path_buf: [Io.Dir.max_path_bytes]u8 = undefined;
+            const len = try cwd.realPath(io, &path_buf);
+            name = try allocator.dupe(u8, Io.Dir.path.basename(path_buf[0..len]));
             name_owned = true;
         }
     } else {
-        // Create new directory
         name = name_opt orelse {
             std.debug.print("Error: Project name required when not using --path\n", .{});
             return error.MissingProjectName;
         };
+    }
 
-        std.fs.cwd().makeDir(name) catch |err| {
+    // Validate *before* touching the filesystem, so a bad name doesn't leave
+    // an empty directory behind.
+    if (!isValidModuleName(name)) {
+        std.debug.print("Error: '{s}' is not a valid Python module name\n", .{name});
+        std.debug.print("Names must start with a letter and contain only letters, numbers, and underscores\n", .{});
+        return error.InvalidModuleName;
+    }
+
+    var project_dir: Io.Dir = cwd;
+    var created_dir = false;
+    if (!in_current_dir) {
+        cwd.createDir(io, name, .default_dir) catch |err| {
             if (err == error.PathAlreadyExists) {
                 std.debug.print("Error: Directory '{s}' already exists\n", .{name});
                 return error.DirectoryExists;
@@ -37,71 +52,64 @@ pub fn create(allocator: std.mem.Allocator, name_opt: ?[]const u8, in_current_di
             return err;
         };
         created_dir = true;
-
-        project_dir = try std.fs.cwd().openDir(name, .{});
+        project_dir = try cwd.openDir(io, name, .{});
     }
-    defer if (created_dir) project_dir.close();
-    defer if (name_owned) allocator.free(name);
+    defer if (created_dir) project_dir.close(io);
 
     std.debug.print("Creating PyOZ project: {s}\n", .{name});
 
-    // Validate project name (must be valid Python identifier)
-    if (!isValidModuleName(name)) {
-        std.debug.print("Error: '{s}' is not a valid Python module name\n", .{name});
-        std.debug.print("Names must start with a letter and contain only letters, numbers, and underscores\n", .{});
-        return error.InvalidModuleName;
-    }
-
     // Create directory structure
-    try project_dir.makeDir("src");
+    try project_dir.createDir(io, "src", .default_dir);
 
     // Create pyproject.toml
     if (package_layout) {
-        try writeTemplate(allocator, project_dir, "pyproject.toml", pyproject_package_template, name);
+        try writeTemplate(allocator, io, project_dir, "pyproject.toml", pyproject_package_template, name);
     } else {
-        try writeTemplate(allocator, project_dir, "pyproject.toml", pyproject_template, name);
+        try writeTemplate(allocator, io, project_dir, "pyproject.toml", pyproject_template, name);
     }
 
     // Create src/lib.zig
     if (package_layout) {
-        try writeTemplate(allocator, project_dir, "src/lib.zig", lib_zig_package_template, name);
+        try writeTemplate(allocator, io, project_dir, "src/lib.zig", lib_zig_package_template, name);
     } else {
-        try writeTemplate(allocator, project_dir, "src/lib.zig", lib_zig_template, name);
+        try writeTemplate(allocator, io, project_dir, "src/lib.zig", lib_zig_template, name);
     }
 
     // Create build.zig (for users who want to use zig build directly)
     if (package_layout) {
-        try writeTemplate(allocator, project_dir, "build.zig", build_zig_package_template, name);
+        try writeTemplate(allocator, io, project_dir, "build.zig", build_zig_package_template, name);
     } else {
-        try writeTemplate(allocator, project_dir, "build.zig", build_zig_template, name);
+        try writeTemplate(allocator, io, project_dir, "build.zig", build_zig_template, name);
     }
 
     // Create Python package directory with __init__.py (package layout only)
     if (package_layout) {
-        try project_dir.makeDir(name);
+        try project_dir.createDir(io, name, .default_dir);
         const init_py_content = try replaceInTemplate(allocator, init_py_template, name);
         defer allocator.free(init_py_content);
         const init_py_path = try std.fmt.allocPrint(allocator, "{s}/__init__.py", .{name});
         defer allocator.free(init_py_path);
-        try project_dir.writeFile(.{ .sub_path = init_py_path, .data = init_py_content });
+        try project_dir.writeFile(io, .{ .sub_path = init_py_path, .data = init_py_content });
     }
 
     // Create build.zig.zon for dependency management
+    var fp_buf: [18]u8 = undefined;
+    const fingerprint = std.fmt.bufPrint(&fp_buf, "0x{x:0>16}", .{packageFingerprint(io, name)}) catch unreachable;
+
     if (local_pyoz_path) |local_path| {
-        try writeLocalBuildZigZon(allocator, project_dir, name, local_path);
+        try writeLocalBuildZigZon(allocator, io, project_dir, name, fingerprint, local_path);
     } else {
-        try writeTemplate(allocator, project_dir, "build.zig.zon", build_zig_zon_template, name);
-        // Patch fingerprint by running zig build and parsing the suggestion
-        patchFingerprint(allocator, project_dir);
-        // Patch dependency hash by running zig build again
-        patchDependencyHash(allocator, project_dir);
+        const zon = try replaceInTemplateExt(allocator, build_zig_zon_template, name, fingerprint);
+        defer allocator.free(zon);
+        try project_dir.writeFile(io, .{ .sub_path = "build.zig.zon", .data = zon });
+        fetchDependencyHash(allocator, io, project_dir);
     }
 
     // Create .gitignore
-    try project_dir.writeFile(.{ .sub_path = ".gitignore", .data = gitignore_content });
+    try project_dir.writeFile(io, .{ .sub_path = ".gitignore", .data = gitignore_content });
 
     // Create README.md
-    try writeTemplate(allocator, project_dir, "README.md", readme_template, name);
+    try writeTemplate(allocator, io, project_dir, "README.md", readme_template, name);
 
     if (package_layout) {
         std.debug.print(
@@ -183,8 +191,29 @@ fn isValidModuleName(name: []const u8) bool {
     return true;
 }
 
+/// Zig package fingerprint: high 32 bits are crc32(name), low 32 bits a random id
+/// (never 0 or 0xffffffff). Generating it here avoids running a whole
+/// `zig build` just to scrape the compiler's suggestion from stderr.
+fn packageFingerprint(io: std.Io, name: []const u8) u64 {
+    var id_bytes: [4]u8 = undefined;
+    io.random(&id_bytes);
+    var id = std.mem.readInt(u32, &id_bytes, .little);
+    if (id == 0 or id == 0xffffffff) id = 1;
+    return (@as(u64, std.hash.Crc32.hash(name)) << 32) | id;
+}
+
+test packageFingerprint {
+    // PyOZ's own build.zig.zon fingerprint shares the crc32("PyOZ") high half
+    const fp = packageFingerprint(std.testing.io, "PyOZ");
+    try std.testing.expectEqual(@as(u32, 0x4d366841), @as(u32, @truncate(fp >> 32)));
+}
+
 fn replaceInTemplate(allocator: std.mem.Allocator, template: []const u8, name: []const u8) ![]u8 {
-    var result = std.ArrayListUnmanaged(u8){};
+    return replaceInTemplateExt(allocator, template, name, "");
+}
+
+fn replaceInTemplateExt(allocator: std.mem.Allocator, template: []const u8, name: []const u8, fingerprint: []const u8) ![]u8 {
+    var result: std.ArrayList(u8) = .empty;
     errdefer result.deinit(allocator);
 
     var i: usize = 0;
@@ -192,6 +221,9 @@ fn replaceInTemplate(allocator: std.mem.Allocator, template: []const u8, name: [
         if (i + 9 <= template.len and std.mem.eql(u8, template[i .. i + 9], "{[name]s}")) {
             try result.appendSlice(allocator, name);
             i += 9;
+        } else if (std.mem.startsWith(u8, template[i..], "{[fingerprint]s}")) {
+            try result.appendSlice(allocator, fingerprint);
+            i += "{[fingerprint]s}".len;
         } else if (i + 17 <= template.len and std.mem.eql(u8, template[i .. i + 17], "{[pyoz_version]s}")) {
             try result.appendSlice(allocator, version.string);
             i += 17;
@@ -206,175 +238,131 @@ fn replaceInTemplate(allocator: std.mem.Allocator, template: []const u8, name: [
 
 fn writeTemplate(
     allocator: std.mem.Allocator,
-    dir: std.fs.Dir,
+    io: Io,
+    dir: Io.Dir,
     path: []const u8,
     template: []const u8,
     name: []const u8,
 ) !void {
     const content = try replaceInTemplate(allocator, template, name);
     defer allocator.free(content);
-    try dir.writeFile(.{ .sub_path = path, .data = content });
+    try dir.writeFile(io, .{ .sub_path = path, .data = content });
 }
 
 /// Compute relative path from `from_path` to `to_path`
 fn computeRelativePath(allocator: std.mem.Allocator, from_path: []const u8, to_path: []const u8) ![]const u8 {
-    // Split paths into components
-    var from_parts = std.ArrayListUnmanaged([]const u8){};
+    return relativePath(allocator, from_path, to_path, builtin.os.tag == .windows);
+}
+
+/// Relative path from `from_path` to `to_path` (both absolute), always with
+/// '/' separators: build.zig.zon strings then need no escaping, and Zig
+/// accepts '/' on Windows. Windows paths compare case-insensitively; on
+/// different drives there is no relative path, so `to_path` is returned.
+fn relativePath(allocator: std.mem.Allocator, from_path: []const u8, to_path: []const u8, windows: bool) ![]const u8 {
+    const seps = if (windows) "/\\" else "/";
+    var from_parts: std.ArrayList([]const u8) = .empty;
     defer from_parts.deinit(allocator);
-    var to_parts = std.ArrayListUnmanaged([]const u8){};
+    var to_parts: std.ArrayList([]const u8) = .empty;
     defer to_parts.deinit(allocator);
 
-    var from_it = std.mem.splitScalar(u8, from_path, '/');
-    while (from_it.next()) |part| {
-        if (part.len > 0) try from_parts.append(allocator, part);
-    }
+    var from_it = std.mem.tokenizeAny(u8, from_path, seps);
+    while (from_it.next()) |part| try from_parts.append(allocator, part);
+    var to_it = std.mem.tokenizeAny(u8, to_path, seps);
+    while (to_it.next()) |part| try to_parts.append(allocator, part);
 
-    var to_it = std.mem.splitScalar(u8, to_path, '/');
-    while (to_it.next()) |part| {
-        if (part.len > 0) try to_parts.append(allocator, part);
+    const eql = struct {
+        fn f(win: bool, a: []const u8, b: []const u8) bool {
+            return if (win) std.ascii.eqlIgnoreCase(a, b) else std.mem.eql(u8, a, b);
+        }
+    }.f;
+
+    var result: std.ArrayList(u8) = .empty;
+    errdefer result.deinit(allocator);
+
+    // Different drives (D: vs C:): use the absolute path
+    if (windows and (from_parts.items.len == 0 or to_parts.items.len == 0 or !eql(true, from_parts.items[0], to_parts.items[0]))) {
+        for (to_path) |c| try result.append(allocator, if (c == '\\') '/' else c);
+        return result.toOwnedSlice(allocator);
     }
 
     // Find common prefix length
     var common: usize = 0;
     while (common < from_parts.items.len and common < to_parts.items.len) {
-        if (!std.mem.eql(u8, from_parts.items[common], to_parts.items[common])) break;
+        if (!eql(windows, from_parts.items[common], to_parts.items[common])) break;
         common += 1;
     }
 
-    // Build relative path: go up from `from`, then down to `to`
-    var result = std.ArrayListUnmanaged(u8){};
-    errdefer result.deinit(allocator);
-
-    // Add "../" for each remaining component in from_path
-    const ups = from_parts.items.len - common;
-    for (0..ups) |_| {
-        try result.appendSlice(allocator, "../");
-    }
-
-    // Add remaining components from to_path
+    // Go up from `from`, then down to `to`
+    for (0..from_parts.items.len - common) |_| try result.appendSlice(allocator, "../");
     for (to_parts.items[common..], 0..) |part, i| {
         if (i > 0) try result.append(allocator, '/');
         try result.appendSlice(allocator, part);
     }
 
-    // Handle edge case where result is empty (same directory)
-    if (result.items.len == 0) {
-        try result.append(allocator, '.');
-    }
+    // Same directory
+    if (result.items.len == 0) try result.append(allocator, '.');
 
     // Remove trailing slash if present
-    if (result.items.len > 1 and result.items[result.items.len - 1] == '/') {
-        _ = result.pop();
-    }
+    if (result.items.len > 1 and result.items[result.items.len - 1] == '/') _ = result.pop();
 
     return result.toOwnedSlice(allocator);
 }
 
-/// Run `zig build` in the project directory, parse the suggested fingerprint
-/// from stderr, and patch build.zig.zon to include it.
-fn patchFingerprint(allocator: std.mem.Allocator, dir: std.fs.Dir) void {
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cwd_path = dir.realpath(".", &path_buf) catch return;
-
-    const result = std.process.Child.run(.{
-        .allocator = allocator,
-        .argv = &.{ "zig", "build" },
-        .cwd = cwd_path,
-    }) catch return; // If zig build fails to run, skip fingerprint patching
-
-    defer allocator.free(result.stdout);
-    defer allocator.free(result.stderr);
-
-    // Parse the suggested fingerprint from stderr
-    // Format: "suggested value: 0x661af9ad2d7f95bc"
-    if (std.mem.indexOf(u8, result.stderr, "suggested value: 0x")) |idx| {
-        const start = idx + 19; // length of "suggested value: 0x"
-        if (start + 16 <= result.stderr.len) {
-            const fingerprint_hex = result.stderr[start .. start + 16];
-            // Read existing content and insert fingerprint
-            const existing = dir.readFileAlloc(allocator, "build.zig.zon", 4096) catch return;
-            defer allocator.free(existing);
-
-            var patched = std.ArrayListUnmanaged(u8){};
-            defer patched.deinit(allocator);
-
-            // Insert fingerprint after version line
-            if (std.mem.indexOf(u8, existing, ".version = \"0.1.0\",")) |ver_idx| {
-                const insert_pos = ver_idx + 19; // after version line
-                patched.appendSlice(allocator, existing[0..insert_pos]) catch return;
-                patched.appendSlice(allocator, "\n    .fingerprint = 0x") catch return;
-                patched.appendSlice(allocator, fingerprint_hex) catch return;
-                patched.appendSlice(allocator, ",") catch return;
-                patched.appendSlice(allocator, existing[insert_pos..]) catch return;
-
-                dir.writeFile(.{ .sub_path = "build.zig.zon", .data = patched.items }) catch return;
-            }
-        }
+test relativePath {
+    const a = std.testing.allocator;
+    const cases = [_]struct { from: []const u8, to: []const u8, win: bool, want: []const u8 }{
+        .{ .from = "/home/u/proj/demo", .to = "/home/u/PyOZ", .win = false, .want = "../../PyOZ" },
+        .{ .from = "/tmp/x", .to = "/home/y", .win = false, .want = "../../home/y" },
+        .{ .from = "/a/b", .to = "/a/b", .win = false, .want = "." },
+        // The CI failure: "../D:\\a\\PyOZ\\PyOZ" with unescaped backslashes
+        .{ .from = "D:\\a\\PyOZ\\wheel-proj\\demo", .to = "D:\\a\\PyOZ\\PyOZ", .win = true, .want = "../../PyOZ" },
+        .{ .from = "c:\\Users\\Me\\demo", .to = "C:\\users\\me\\PyOZ", .win = true, .want = "../PyOZ" },
+        .{ .from = "C:\\work\\demo", .to = "D:\\src\\PyOZ", .win = true, .want = "D:/src/PyOZ" },
+    };
+    for (cases) |c| {
+        const got = try relativePath(a, c.from, c.to, c.win);
+        defer a.free(got);
+        try std.testing.expectEqualStrings(c.want, got);
     }
 }
 
-/// Run `zig build` after fingerprint patching to get the dependency hash,
-/// then patch build.zig.zon to include it.
-fn patchDependencyHash(allocator: std.mem.Allocator, dir: std.fs.Dir) void {
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cwd_path = dir.realpath(".", &path_buf) catch return;
-
-    const result = std.process.Child.run(.{
-        .allocator = allocator,
-        .argv = &.{ "zig", "build" },
-        .cwd = cwd_path,
-    }) catch return;
-
+/// Pin the PyOZ dependency hash with the official `zig fetch --save`, which
+/// rewrites build.zig.zon in place. (Previously `zig build` was run twice and
+/// the fingerprint/hash scraped from compiler error messages.)
+fn fetchDependencyHash(allocator: std.mem.Allocator, io: Io, dir: Io.Dir) void {
+    const url = "https://github.com/pyozig/PyOZ/archive/refs/tags/v" ++ version.string ++ ".tar.gz";
+    const result = std.process.run(allocator, io, .{
+        .argv = &.{ "zig", "fetch", "--save=PyOZ", url },
+        .cwd = .{ .dir = dir },
+    }) catch {
+        std.debug.print("  Note: could not run 'zig fetch'; run it manually:\n    zig fetch --save=PyOZ {s}\n", .{url});
+        return;
+    };
     defer allocator.free(result.stdout);
     defer allocator.free(result.stderr);
-
-    // Parse the suggested hash from stderr
-    // Format: note: expected .hash = "PyOZ-0.10.0-...",
-    const marker = "expected .hash = \"";
-    if (std.mem.indexOf(u8, result.stderr, marker)) |idx| {
-        const start = idx + marker.len;
-        if (std.mem.indexOfScalarPos(u8, result.stderr, start, '"')) |end| {
-            const hash_value = result.stderr[start..end];
-
-            const existing = dir.readFileAlloc(allocator, "build.zig.zon", 8192) catch return;
-            defer allocator.free(existing);
-
-            // Replace "// .hash = "..."," with actual ".hash = "VALUE","
-            const comment = "// .hash = \"...\",";
-            if (std.mem.indexOf(u8, existing, comment)) |comment_idx| {
-                var patched = std.ArrayListUnmanaged(u8){};
-                defer patched.deinit(allocator);
-
-                patched.appendSlice(allocator, existing[0..comment_idx]) catch return;
-                patched.appendSlice(allocator, ".hash = \"") catch return;
-                patched.appendSlice(allocator, hash_value) catch return;
-                patched.appendSlice(allocator, "\",") catch return;
-                patched.appendSlice(allocator, existing[comment_idx + comment.len ..]) catch return;
-
-                dir.writeFile(.{ .sub_path = "build.zig.zon", .data = patched.items }) catch return;
-            }
-        }
+    if (!sys.exitedOk(result.term)) {
+        std.debug.print("  Note: 'zig fetch' failed; run it manually once online:\n    zig fetch --save=PyOZ {s}\n", .{url});
     }
 }
 
 fn writeLocalBuildZigZon(
     allocator: std.mem.Allocator,
-    dir: std.fs.Dir,
+    io: Io,
+    dir: Io.Dir,
     name: []const u8,
+    fingerprint: []const u8,
     local_path: []const u8,
 ) !void {
     // Get absolute path of project directory
-    var proj_path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const proj_abs_path = try dir.realpath(".", &proj_path_buf);
+    var proj_path_buf: [Io.Dir.max_path_bytes]u8 = undefined;
+    const proj_abs_path = proj_path_buf[0..try dir.realPath(io, &proj_path_buf)];
 
     // Make local_path absolute if it isn't already
-    var pyoz_path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const pyoz_abs_path = if (std.fs.path.isAbsolute(local_path))
+    var pyoz_path_buf: [Io.Dir.max_path_bytes]u8 = undefined;
+    const pyoz_abs_path = if (Io.Dir.path.isAbsolute(local_path))
         local_path
-    else blk: {
-        const cwd = std.fs.cwd();
-        break :blk try cwd.realpath(local_path, &pyoz_path_buf);
-    };
+    else
+        pyoz_path_buf[0..try Io.Dir.cwd().realPathFile(io, local_path, &pyoz_path_buf)];
 
     // Compute relative path from project to PyOZ
     const relative_path = try computeRelativePath(allocator, proj_abs_path, pyoz_abs_path);
@@ -385,6 +373,10 @@ fn writeLocalBuildZigZon(
         \\.{{
         \\    .name = .{s},
         \\    .version = "0.1.0",
+        \\    .fingerprint = {s},
+        \\    .minimum_zig_version = "
+    ++ version.zig ++
+        \\",
         \\    .dependencies = .{{
         \\        .PyOZ = .{{
         \\            .path = "{s}",
@@ -397,12 +389,9 @@ fn writeLocalBuildZigZon(
         \\    }},
         \\}}
         \\
-    , .{ name, relative_path });
+    , .{ name, fingerprint, relative_path });
     defer allocator.free(content);
-    try dir.writeFile(.{ .sub_path = "build.zig.zon", .data = content });
-
-    // Patch fingerprint by running zig build and parsing the suggestion
-    patchFingerprint(allocator, dir);
+    try dir.writeFile(io, .{ .sub_path = "build.zig.zon", .data = content });
 }
 
 // =============================================================================
@@ -418,7 +407,7 @@ const pyproject_template =
     \\name = "{[name]s}"
     \\version = "0.1.0"
     \\description = "A Python extension module built with PyOZ"
-    \\requires-python = ">=3.8"
+    \\requires-python = ">=3.10"
     \\readme = "README.md"
     \\
     \\[tool.pyoz]
@@ -454,7 +443,7 @@ const pyproject_package_template =
     \\name = "{[name]s}"
     \\version = "0.1.0"
     \\description = "A Python extension module built with PyOZ"
-    \\requires-python = ">=3.8"
+    \\requires-python = ">=3.10"
     \\readme = "README.md"
     \\
     \\[tool.pyoz]
@@ -537,7 +526,6 @@ const build_zig_template =
     \\//! automatic Python configuration detection.
     \\
     \\const std = @import("std");
-    \\const builtin = @import("builtin");
     \\
     \\pub fn build(b: *std.Build) void {
     \\    const target = b.standardTargetOptions(.{});
@@ -558,6 +546,8 @@ const build_zig_template =
     \\        .target = target,
     \\        .optimize = optimize,
     \\        .strip = strip,
+    \\        // libc is required for the Python C API
+    \\        .link_libc = true,
     \\        .imports = &.{
     \\            .{ .name = "PyOZ", .module = pyoz_dep.module("PyOZ") },
     \\        },
@@ -574,25 +564,27 @@ const build_zig_template =
     \\        .root_module = user_lib_mod,
     \\    });
     \\
-    \\    // Link libc (required for Python C API)
-    \\    lib.linkLibC();
+    \\    // Extensions get the Python C API from the interpreter at load time, not
+    \\    // from a library: macOS needs this (-undefined dynamic_lookup).
+    \\    if (target.result.os.tag == .macos) lib.linker_allow_shlib_undefined = true;
     \\
     \\    // On Windows, link against the Python stable ABI library (python3.lib).
     \\    // These options are passed automatically by `pyoz build`.
     \\    // For manual `zig build` on Windows, pass: -Dpython-lib-dir=<path> -Dpython-lib-name=python3
     \\    if (b.option([]const u8, "python-lib-dir", "Python library directory")) |lib_dir| {
-    \\        lib.addLibraryPath(.{ .cwd_relative = lib_dir });
+    \\        user_lib_mod.addLibraryPath(.{ .cwd_relative = lib_dir });
     \\    }
     \\    if (b.option([]const u8, "python-lib-name", "Python library name")) |lib_name| {
-    \\        lib.linkSystemLibrary(lib_name);
+    \\        user_lib_mod.linkSystemLibrary(lib_name, .{});
     \\    }
     \\
-    \\    // Determine extension based on target OS (.pyd for Windows, .so otherwise)
-    \\    const ext = if (builtin.os.tag == .windows) ".pyd" else ".so";
+    \\    // Extension depends on the *target* OS (.pyd for Windows, .so otherwise),
+    \\    // so cross-compiling from Linux to Windows produces a correct .pyd
+    \\    const ext = if (target.result.os.tag == .windows) ".pyd" else ".so";
     \\
     \\    // Install the shared library
     \\    const install = b.addInstallArtifact(lib, .{
-    \\        .dest_sub_path = "{[name]s}" ++ ext,
+    \\        .dest_sub_path = b.fmt("{[name]s}{s}", .{ext}),
     \\    });
     \\    b.getInstallStep().dependOn(&install.step);
     \\
@@ -607,7 +599,6 @@ const build_zig_package_template =
     \\//! automatic Python configuration detection.
     \\
     \\const std = @import("std");
-    \\const builtin = @import("builtin");
     \\
     \\pub fn build(b: *std.Build) void {
     \\    const target = b.standardTargetOptions(.{});
@@ -628,6 +619,8 @@ const build_zig_package_template =
     \\        .target = target,
     \\        .optimize = optimize,
     \\        .strip = strip,
+    \\        // libc is required for the Python C API
+    \\        .link_libc = true,
     \\        .imports = &.{
     \\            .{ .name = "PyOZ", .module = pyoz_dep.module("PyOZ") },
     \\        },
@@ -645,25 +638,27 @@ const build_zig_package_template =
     \\        .root_module = user_lib_mod,
     \\    });
     \\
-    \\    // Link libc (required for Python C API)
-    \\    lib.linkLibC();
+    \\    // Extensions get the Python C API from the interpreter at load time, not
+    \\    // from a library: macOS needs this (-undefined dynamic_lookup).
+    \\    if (target.result.os.tag == .macos) lib.linker_allow_shlib_undefined = true;
     \\
     \\    // On Windows, link against the Python stable ABI library (python3.lib).
     \\    // These options are passed automatically by `pyoz build`.
     \\    // For manual `zig build` on Windows, pass: -Dpython-lib-dir=<path> -Dpython-lib-name=python3
     \\    if (b.option([]const u8, "python-lib-dir", "Python library directory")) |lib_dir| {
-    \\        lib.addLibraryPath(.{ .cwd_relative = lib_dir });
+    \\        user_lib_mod.addLibraryPath(.{ .cwd_relative = lib_dir });
     \\    }
     \\    if (b.option([]const u8, "python-lib-name", "Python library name")) |lib_name| {
-    \\        lib.linkSystemLibrary(lib_name);
+    \\        user_lib_mod.linkSystemLibrary(lib_name, .{});
     \\    }
     \\
-    \\    // Determine extension based on target OS (.pyd for Windows, .so otherwise)
-    \\    const ext = if (builtin.os.tag == .windows) ".pyd" else ".so";
+    \\    // Extension depends on the *target* OS (.pyd for Windows, .so otherwise),
+    \\    // so cross-compiling from Linux to Windows produces a correct .pyd
+    \\    const ext = if (target.result.os.tag == .windows) ".pyd" else ".so";
     \\
     \\    // Install the shared library
     \\    const install = b.addInstallArtifact(lib, .{
-    \\        .dest_sub_path = "_{[name]s}" ++ ext,
+    \\        .dest_sub_path = b.fmt("_{[name]s}{s}", .{ext}),
     \\    });
     \\    b.getInstallStep().dependOn(&install.step);
     \\
@@ -728,6 +723,10 @@ const build_zig_zon_template =
     \\.{
     \\    .name = .{[name]s},
     \\    .version = "0.1.0",
+    \\    .fingerprint = {[fingerprint]s},
+    \\    .minimum_zig_version = "
+++ version.zig ++
+    \\",
     \\    .dependencies = .{
     \\        .PyOZ = .{
     \\            .url = "https://github.com/pyozig/PyOZ/archive/refs/tags/v{[pyoz_version]s}.tar.gz",
@@ -772,7 +771,7 @@ const readme_template =
     \\
     \\```bash
     \\# Build a wheel for distribution
-    \\pyoz build-wheel
+    \\pyoz build
     \\
     \\# The wheel will be in dist/
     \\```

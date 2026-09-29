@@ -4,6 +4,7 @@
 //! from Zig functions, with support for keyword arguments and error mapping.
 
 const std = @import("std");
+const aio = @import("aio.zig");
 const py = @import("python.zig");
 const PyObject = py.PyObject;
 const conversion = @import("conversion.zig");
@@ -125,8 +126,128 @@ pub fn ArgsTuple(comptime params: anytype) type {
 /// Type for keyword function signature (C calling convention)
 pub const PyCFunctionWithKeywords = *const fn (?*PyObject, ?*PyObject, ?*PyObject) callconv(.c) ?*PyObject;
 
-/// Generate a Python-callable wrapper for a Zig function with named keyword arguments
-/// The function should take Args(SomeStruct) as its parameter
+/// True if `T` is a `pyoz.Args(...)` wrapper (named keyword arguments).
+pub fn isArgs(comptime T: type) bool {
+    return @typeInfo(T) == .@"struct" and @hasDecl(T, "is_pyoz_args");
+}
+
+/// Parse positional and keyword arguments into the struct wrapped by
+/// `pyoz.Args(ArgsStructType)`, following Python's rules: positional values
+/// fill fields in order, keywords by name, then field defaults (optionals
+/// default to null). Returns null with a TypeError set, using CPython's
+/// wording; `func_name` (may be empty) prefixes the messages, e.g.
+/// "translate() got an unexpected keyword argument 'dz'".
+/// Release the result with `releaseNamedArgs` after the call.
+pub fn parseNamedArgs(
+    comptime ArgsStructType: type,
+    comptime class_infos: []const ClassInfo,
+    comptime func_name: []const u8,
+    args: ?*py.PyObject,
+    kwargs: ?*py.PyObject,
+) ?ArgsStructType {
+    const Conv = Converter(class_infos);
+    const fields = @typeInfo(ArgsStructType).@"struct".fields;
+    const prefix = if (func_name.len > 0) func_name ++ "() " else "";
+    var result: ArgsStructType = undefined;
+
+    const pos_count: usize = if (args) |a| @intCast(py.PyTuple_Size(a)) else 0;
+    if (pos_count > fields.len) {
+        _ = py.c.PyErr_Format(py.PyExc_TypeError(), prefix ++ "takes at most %d positional arguments (%zd given)", @as(c_int, fields.len), @as(py.Py_ssize_t, @intCast(pos_count)));
+        return null;
+    }
+
+    var keywords_used: py.Py_ssize_t = 0;
+    inline for (fields, 0..) |field, i| {
+        const keyword: ?*py.PyObject = if (kwargs) |kw| py.PyDict_GetItemString(kw, field.name.ptr) else null;
+        if (keyword != null) {
+            if (i < pos_count) {
+                py.PyErr_SetString(py.PyExc_TypeError(), prefix ++ "got multiple values for argument '" ++ field.name ++ "'");
+                return null;
+            }
+            keywords_used += 1;
+        }
+
+        const item: ?*py.PyObject = if (i < pos_count) py.PyTuple_GetItem(args.?, @intCast(i)) else keyword;
+        if (item) |obj| {
+            @field(result, field.name) = convertField(Conv, field.type, obj) catch {
+                // Keep a specific error from the conversion (e.g. OverflowError)
+                if (py.PyErr_Occurred() == null)
+                    py.PyErr_SetString(py.PyExc_TypeError(), prefix ++ "argument '" ++ field.name ++ "' has the wrong type");
+                releaseFields(ArgsStructType, &result, i);
+                return null;
+            };
+        } else if (field.defaultValue()) |default| {
+            @field(result, field.name) = default;
+        } else if (@typeInfo(field.type) == .optional) {
+            @field(result, field.name) = null;
+        } else {
+            py.PyErr_SetString(py.PyExc_TypeError(), prefix ++ "missing required argument '" ++ field.name ++ "'");
+            releaseFields(ArgsStructType, &result, i);
+            return null;
+        }
+    }
+
+    // Every keyword must have matched a field
+    if (kwargs) |kw| if (keywords_used < py.PyDict_Size(kw)) {
+        var pos: py.Py_ssize_t = 0;
+        var key: ?*py.PyObject = null;
+        var value: ?*py.PyObject = null;
+        while (py.PyDict_Next(kw, &pos, &key, &value) != 0) {
+            if (!isField(fields, key.?)) {
+                _ = py.c.PyErr_Format(py.PyExc_TypeError(), prefix ++ "got an unexpected keyword argument '%U'", key);
+                break;
+            }
+        }
+        releaseFields(ArgsStructType, &result, fields.len);
+        return null;
+    };
+
+    return result;
+}
+
+fn convertField(comptime Conv: type, comptime F: type, obj: *py.PyObject) !F {
+    if (@typeInfo(F) == .optional) {
+        if (py.PyNone_Check(obj)) return null;
+        return try Conv.fromPy(@typeInfo(F).optional.child, obj);
+    }
+    return Conv.fromPy(F, obj);
+}
+
+fn isField(comptime fields: []const std.builtin.Type.StructField, key: *py.PyObject) bool {
+    var len: py.Py_ssize_t = 0;
+    const name = py.PyUnicode_AsUTF8AndSize(key, &len) orelse {
+        py.PyErr_Clear();
+        return false;
+    };
+    inline for (fields) |f| if (std.mem.eql(u8, f.name, name[0..@intCast(len)])) return true;
+    return false;
+}
+
+/// Release what parsed arguments hold (Path references, buffer views).
+pub fn releaseNamedArgs(comptime ArgsStructType: type, parsed: *ArgsStructType) void {
+    releaseFields(ArgsStructType, parsed, @typeInfo(ArgsStructType).@"struct".fields.len);
+}
+
+/// Release the first `count` fields (those already converted).
+fn releaseFields(comptime ArgsStructType: type, parsed: *ArgsStructType, count: usize) void {
+    inline for (@typeInfo(ArgsStructType).@"struct".fields, 0..) |field, i| {
+        if (i < count) releaseValue(field.type, &@field(parsed, field.name));
+    }
+}
+
+fn releaseValue(comptime F: type, v: *F) void {
+    switch (@typeInfo(F)) {
+        .optional => |o| if (v.*) |*inner| releaseValue(o.child, inner),
+        .@"struct" => {
+            if (@hasDecl(F, "is_buffer_view") and F.is_buffer_view) v.release();
+            if (F == conversion.Path) v.deinit();
+        },
+        else => {},
+    }
+}
+
+/// Generate a Python-callable wrapper for a Zig function with named keyword arguments.
+/// The function should take Args(SomeStruct) as its parameter.
 pub fn wrapFunctionWithNamedKeywords(comptime zig_func: anytype, comptime class_infos: []const ClassInfo) PyCFunctionWithKeywords {
     const Conv = Converter(class_infos);
     const Fn = @TypeOf(zig_func);
@@ -141,78 +262,13 @@ pub fn wrapFunctionWithNamedKeywords(comptime zig_func: anytype, comptime class_
     else
         @compileError("kwfunc parameter must be wrapped in pyoz.Args(T). Change `fn(" ++
             @typeName(ArgsWrapperType) ++ ")` to `fn(pyoz.Args(YourArgsStruct))`");
-    const args_fields = @typeInfo(ArgsStructType).@"struct".fields;
 
     return struct {
         fn wrapper(self: ?*PyObject, args: ?*PyObject, kwargs: ?*PyObject) callconv(.c) ?*PyObject {
             _ = self;
 
-            var result_args: ArgsStructType = undefined;
-
-            // Get positional args count
-            const pos_count: usize = if (args) |a| @intCast(py.PyTuple_Size(a)) else 0;
-
-            // Parse each field
-            inline for (args_fields, 0..) |field, i| {
-                const has_default = field.default_value_ptr != null;
-                const is_optional = @typeInfo(field.type) == .optional;
-
-                // Try positional first
-                if (i < pos_count) {
-                    const item = py.PyTuple_GetItem(args.?, @intCast(i)) orelse {
-                        setError(error.InvalidArgument);
-                        return null;
-                    };
-                    if (is_optional and py.PyNone_Check(item)) {
-                        @field(result_args, field.name) = null;
-                    } else if (is_optional) {
-                        const inner_type = @typeInfo(field.type).optional.child;
-                        @field(result_args, field.name) = Conv.fromPy(inner_type, item) catch {
-                            setFieldError(field.name);
-                            return null;
-                        };
-                    } else {
-                        @field(result_args, field.name) = Conv.fromPy(field.type, item) catch {
-                            setFieldError(field.name);
-                            return null;
-                        };
-                    }
-                } else if (kwargs) |kw| {
-                    // Try keyword argument by name
-                    if (py.PyDict_GetItemString(kw, field.name.ptr)) |item| {
-                        if (is_optional and py.PyNone_Check(item)) {
-                            @field(result_args, field.name) = null;
-                        } else if (is_optional) {
-                            const inner_type = @typeInfo(field.type).optional.child;
-                            @field(result_args, field.name) = Conv.fromPy(inner_type, item) catch {
-                                setFieldError(field.name);
-                                return null;
-                            };
-                        } else {
-                            @field(result_args, field.name) = Conv.fromPy(field.type, item) catch {
-                                setFieldError(field.name);
-                                return null;
-                            };
-                        }
-                    } else if (has_default) {
-                        // Use default value
-                        @field(result_args, field.name) = field.defaultValue().?;
-                    } else if (is_optional) {
-                        @field(result_args, field.name) = null;
-                    } else {
-                        setMissingError(field.name);
-                        return null;
-                    }
-                } else if (has_default) {
-                    // Use default value
-                    @field(result_args, field.name) = field.defaultValue().?;
-                } else if (is_optional) {
-                    @field(result_args, field.name) = null;
-                } else {
-                    setMissingError(field.name);
-                    return null;
-                }
-            }
+            var result_args = parseNamedArgs(ArgsStructType, class_infos, "", args, kwargs) orelse return null;
+            defer releaseNamedArgs(ArgsStructType, &result_args);
 
             // Call function with wrapped args
             const wrapped_args = ArgsWrapperType{ .value = result_args };
@@ -228,28 +284,18 @@ pub fn wrapFunctionWithNamedKeywords(comptime zig_func: anytype, comptime class_
                 if (result) |value| {
                     return Conv.toPy(@TypeOf(value), value);
                 } else |err| {
-                    setError(err);
+                    // Don't overwrite an exception already set by Python, e.g.
+                    // KeyboardInterrupt from checkSignals.
+                    if (py.PyErr_Occurred() == null) {
+                        const msg = @errorName(err);
+                        py.PyErr_SetString(mapErrorToExc(err), msg.ptr);
+                    }
+
                     return null;
                 }
             } else {
                 return Conv.toPy(RT, result);
             }
-        }
-
-        fn setError(err: anyerror) void {
-            // Don't overwrite an exception already set by Python
-            // (e.g., KeyboardInterrupt from checkSignals)
-            if (py.PyErr_Occurred() != null) return;
-            const msg = @errorName(err);
-            py.PyErr_SetString(mapErrorToExc(err), msg.ptr);
-        }
-
-        fn setFieldError(comptime field_name: []const u8) void {
-            py.PyErr_SetString(py.PyExc_TypeError(), "Invalid type for argument: " ++ field_name);
-        }
-
-        fn setMissingError(comptime field_name: []const u8) void {
-            py.PyErr_SetString(py.PyExc_TypeError(), "Missing required argument: " ++ field_name);
         }
     }.wrapper;
 }
@@ -319,6 +365,7 @@ pub fn wrapFunctionWithErrorMapping(comptime zig_func: anytype, comptime class_i
 
             if (rt_info == .error_union) {
                 if (result) |value| {
+                    if (comptime aio.isAsyncPending(@TypeOf(value))) return value.bind(Conv, error_mappings);
                     return Conv.toPy(@TypeOf(value), value);
                 } else |err| {
                     setMappedError(err);
@@ -515,6 +562,17 @@ pub fn FuncDefEntry(comptime Func: type) type {
         name: [*:0]const u8,
         func: Func,
         doc: ?[*:0]const u8,
+        /// Comma-separated Python parameter names for stubs and `help()`.
+        /// Zig reflection cannot recover parameter names, so without this
+        /// they appear as arg0, arg1, ...
+        params: ?[]const u8 = null,
+
+        /// Name the Python-visible parameters, e.g. `.withParams("url, timeout")`.
+        pub fn withParams(self: @This(), comptime names: []const u8) @This() {
+            var copy = self;
+            copy.params = names;
+            return copy;
+        }
     };
 }
 

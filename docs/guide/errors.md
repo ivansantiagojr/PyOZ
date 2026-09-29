@@ -165,7 +165,10 @@ fn set_port(self: *Server, port: u16) ?void {
 }
 ```
 
-`pyoz.fmt()` is an inline function that formats into a 4096-byte stack buffer and returns a `[*:0]const u8`. Because it's inlined, the buffer lives in the caller's stack frame and is safe to pass to any function that copies the string immediately (like `PyErr_SetString`, which all raise functions use internally).
+`pyoz.fmt()` is lazy: it captures the arguments by value and the message is
+rendered by the raise function itself, on its own stack (up to 512 bytes, with
+no heap allocation) or in one exact-size heap buffer for longer messages, which
+are never truncated.
 
 It works with any raise function:
 
@@ -174,7 +177,7 @@ return pyoz.raiseTypeError(pyoz.fmt("expected {s}, got {s}", .{ expected, actual
 return pyoz.raiseIndexError(pyoz.fmt("index {d} out of range [0, {d})", .{ idx, len }));
 ```
 
-`pyoz.fmt()` is also useful outside of error handling — anywhere you need a formatted `[*:0]const u8`.
+`pyoz.fmt()` also works as a return value: returning a `pyoz.Formatted(...)` from any function or method (including `__repr__`/`__str__`) produces a Python `str`. See the [API reference](../reference/api.md#pyozfmtcomptime-format-args).
 
 ## Catching Python Exceptions
 

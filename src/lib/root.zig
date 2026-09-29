@@ -304,17 +304,26 @@ pub const exceptionPending = exceptions_mod.exceptionPending;
 pub const clearException = exceptions_mod.clearException;
 pub const Null = exceptions_mod.Null;
 
-/// Format a string using Zig's std.fmt, returning a null-terminated pointer.
-/// Safe to pass to any function that copies the string immediately (e.g. PyErr_SetString).
-/// The buffer lives in the caller's stack frame since this function is inline.
-///
-/// Usage:
-///   return pyoz.raiseValueError(pyoz.fmt("{d} went wrong!", .{42}));
-///   const msg = pyoz.fmt("hello {s}", .{"world"});
-pub inline fn fmt(comptime format: []const u8, args: anytype) [*:0]const u8 {
-    var buf: [4096]u8 = undefined;
-    return (std.fmt.bufPrintZ(&buf, format, args) catch "fmt: message too long").ptr;
-}
+const fmt_mod = @import("fmt.zig");
+/// Lazily formatted message; see src/lib/fmt.zig. Accepted by every `raise*`
+/// helper and convertible to `str` wherever PyOZ converts return values.
+pub const fmt = fmt_mod.fmt;
+pub const Formatted = fmt_mod.Formatted;
+
+const aio_mod = @import("aio.zig");
+/// Wrap a Zig function as a Python function returning an `asyncio.Future`;
+/// see src/lib/aio.zig.
+pub const asyncFn = aio_mod.asyncFn;
+/// Async instance method; see aio.asyncMethod for the `self` contract.
+pub const asyncMethod = aio_mod.asyncMethod;
+/// Result type of calling `asyncFn(f)` from Zig (e.g. inside `__anext__`).
+pub const Future = aio_mod.Future;
+/// The process-wide `std.Io` runtime used by async functions.
+pub const io = aio_mod.io;
+/// Number of async jobs not yet fully cleaned up (diagnostics / leak checks).
+pub const asyncLiveJobs = aio_mod.liveJobs;
+/// Set the maximum number of concurrently running async jobs (default 256).
+pub const setAsyncConcurrency = aio_mod.setConcurrency;
 
 pub const raiseException = exceptions_mod.raiseException;
 pub const raiseValueError = exceptions_mod.raiseValueError;
@@ -1119,7 +1128,7 @@ pub fn module(comptime config: anytype) type {
                     .module_func,
                     kwargs_mode,
                     f.doc,
-                    null,
+                    if (@hasField(@TypeOf(f), "params")) f.params else null,
                 );
 
                 if (is_named_kwargs) {
@@ -1696,7 +1705,16 @@ pub fn module(comptime config: anytype) type {
         }
 
         // Module slots for multi-phase initialization (PEP 489)
-        var module_slots = [_]py.c.PyModuleDef_Slot{
+        // `.gil_used = false` declares the module safe to run without the GIL
+        // (PEP 703). Without it, importing the module on a free-threaded
+        // interpreter silently re-enables the GIL for the whole process.
+        const gil_used: bool = if (@hasField(@TypeOf(config), "gil_used")) config.gil_used else true;
+        const declare_gil_not_used = !gil_used and @hasDecl(py.c, "Py_mod_gil");
+        var module_slots = if (declare_gil_not_used) [_]py.c.PyModuleDef_Slot{
+            .{ .slot = py.c.Py_mod_exec, .value = @ptrCast(@constCast(&moduleExec)) },
+            .{ .slot = py.c.Py_mod_gil, .value = @ptrFromInt(1) }, // Py_MOD_GIL_NOT_USED
+            .{ .slot = 0, .value = null },
+        } else [_]py.c.PyModuleDef_Slot{
             .{ .slot = py.c.Py_mod_exec, .value = @ptrCast(@constCast(&moduleExec)) },
             .{ .slot = 0, .value = null },
         };

@@ -281,3 +281,16 @@ fn run_hook(callback: pyoz.Callable(void), value: i64) bool {
 - [Errors](errors.md) - Exception handling
 - [Functions](functions.md) - Function definitions
 - [Classes](classes.md) - Class definitions
+
+## Formatted Strings
+
+`pyoz.fmt(format, args)` returns a lazily formatted `pyoz.Formatted` value that
+converts to `str` wherever PyOZ converts return values, including `__repr__`:
+
+```zig
+pub fn __repr__(self: *const Vec2) pyoz.Formatted("Vec2({d:.2}, {d:.2})", struct { f64, f64 }) {
+    return .{ .args = .{ self.x, self.y } };
+}
+```
+
+See [`pyoz.fmt`](../reference/api.md#pyozfmtcomptime-format-args).

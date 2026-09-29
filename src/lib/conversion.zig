@@ -202,6 +202,16 @@ pub fn Converter(comptime class_infos: []const class_mod.ClassInfo) type {
                         return py.PyPath_FromString(value.path);
                     }
 
+                    // Async call: bind this module's converter, yield the asyncio.Future
+                    if (@hasDecl(T, "_is_pyoz_async_pending")) {
+                        return value.bind(@This(), &.{});
+                    }
+
+                    // Lazily formatted message (pyoz.fmt) -> str
+                    if (@hasDecl(T, "_is_pyoz_fmt")) {
+                        return value.toPyStr();
+                    }
+
                     // Handle Decimal type
                     if (@hasDecl(T, "_is_pyoz_decimal")) {
                         return PyDecimal_FromString(value.value);
@@ -748,17 +758,22 @@ pub fn Converter(comptime class_infos: []const class_mod.ClassInfo) type {
                     return try fromPy(opt.child, obj);
                 },
                 .array => |arr| {
-                    // Fixed-size array from Python list
-                    if (!py.PyList_Check(obj)) {
+                    // Fixed-size array from a Python list or tuple of exactly arr.len items
+                    const is_list = py.PyList_Check(obj);
+                    if (!is_list and !py.PyTuple_Check(obj)) {
+                        py.PyErr_SetString(py.PyExc_TypeError(), std.fmt.comptimePrint("expected a list or tuple of {d} items", .{arr.len}));
                         return error.TypeError;
                     }
-                    const list_len = py.PyList_Size(obj);
-                    if (list_len != arr.len) {
+                    const len = if (is_list) py.PyList_Size(obj) else py.PyTuple_Size(obj);
+                    if (len != arr.len) {
+                        var buf: [96]u8 = undefined;
+                        const msg = std.fmt.bufPrintZ(&buf, "expected {d} items, got {d}", .{ arr.len, len }) catch "wrong number of items";
+                        py.PyErr_SetString(py.PyExc_ValueError(), msg);
                         return error.WrongArgumentCount;
                     }
                     var result: T = undefined;
                     for (0..arr.len) |i| {
-                        const item = py.PyList_GetItem(obj, @intCast(i)) orelse return error.InvalidArgument;
+                        const item = (if (is_list) py.PyList_GetItem(obj, @intCast(i)) else py.PyTuple_GetItem(obj, @intCast(i))) orelse return error.InvalidArgument;
                         result[i] = try fromPy(arr.child, item);
                     }
                     return result;

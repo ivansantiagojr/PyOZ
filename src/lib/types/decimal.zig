@@ -4,6 +4,7 @@
 //! with exact precision (no floating point errors).
 
 const std = @import("std");
+const lazy = @import("../python/lazy.zig");
 const py = @import("../python.zig");
 const PyObject = py.PyObject;
 
@@ -42,40 +43,31 @@ pub const Decimal = struct {
     }
 };
 
-// Cached decimal module and class
-var decimal_module: ?*PyObject = null;
-var decimal_class: ?*PyObject = null;
+// Cached decimal.Decimal class (free-threading safe; see python/lazy.zig)
+var decimal_class_cache: lazy.LazyObject = .{};
+
+fn decimalClass() ?*PyObject {
+    if (decimal_class_cache.get()) |cls| return cls;
+    const module = py.PyImport_ImportModule("decimal") orelse return null;
+    defer py.Py_DecRef(module);
+    const cls = py.PyObject_GetAttrString(module, "Decimal") orelse return null;
+    return decimal_class_cache.publish(cls);
+}
 
 /// Initialize the decimal module - call this in module init if using Decimal type
 pub fn initDecimal() bool {
-    if (decimal_module != null) return true;
-
-    decimal_module = py.PyImport_ImportModule("decimal");
-    if (decimal_module == null) return false;
-
-    decimal_class = py.PyObject_GetAttrString(decimal_module.?, "Decimal");
-    if (decimal_class == null) {
-        py.Py_DecRef(decimal_module.?);
-        decimal_module = null;
-        return false;
-    }
-
-    return true;
+    return decimalClass() != null;
 }
 
 /// Check if an object is a decimal.Decimal instance
 pub fn PyDecimal_Check(obj: *PyObject) bool {
-    if (decimal_class == null) {
-        if (!initDecimal()) return false;
-    }
-    return py.PyObject_IsInstance(obj, decimal_class.?) == 1;
+    const cls = decimalClass() orelse return false;
+    return py.PyObject_IsInstance(obj, cls) == 1;
 }
 
 /// Create a Python decimal.Decimal from a string
 pub fn PyDecimal_FromString(value: []const u8) ?*PyObject {
-    if (decimal_class == null) {
-        if (!initDecimal()) return null;
-    }
+    const cls = decimalClass() orelse return null;
 
     const py_str = py.PyUnicode_FromStringAndSize(value.ptr, @intCast(value.len)) orelse return null;
     defer py.Py_DecRef(py_str);
@@ -87,7 +79,7 @@ pub fn PyDecimal_FromString(value: []const u8) ?*PyObject {
     py.Py_IncRef(py_str);
     if (py.PyTuple_SetItem(args, 0, py_str) < 0) return null;
 
-    return py.PyObject_Call(decimal_class.?, args, null);
+    return py.PyObject_Call(cls, args, null);
 }
 
 /// Get string representation of a Python decimal.Decimal

@@ -9,8 +9,8 @@
 Build blazing-fast Python extensions with zero boilerplate and zero Python C API headaches.
 
 [![GitHub Stars](https://img.shields.io/github/stars/pyozig/PyOZ?style=flat)](https://github.com/pyozig/PyOZ)
-[![Python](https://img.shields.io/badge/python-3.8--3.13-blue)](https://www.python.org/)
-[![Zig](https://img.shields.io/badge/zig-0.15+-orange)](https://ziglang.org/)
+[![Python](https://img.shields.io/badge/python-3.10--3.14-blue)](https://www.python.org/)
+[![Zig](https://img.shields.io/badge/zig-0.16-orange)](https://ziglang.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 [Documentation](https://pyoz.dev) | [Getting Started](https://pyoz.dev/quickstart/) | [Examples](https://pyoz.dev/examples/complete-module/)
@@ -48,6 +48,8 @@ print(mymodule.add(2, 3))  # 5
 - **Full Class Support** - Magic methods, operators, properties, inheritance
 - **NumPy Integration** - Zero-copy array access
 - **Error Handling** - Zig errors become Python exceptions
+- **Async** - `await` Zig functions from asyncio, built on Zig's `std.Io`, with real cancellation
+- **Free-Threading** - Runs without the GIL on free-threaded CPython (3.14t), with per-object locking
 - **Type Stubs** - Automatic `.pyi` generation for IDE support
 - **Simple Tooling** - `pyoz init`, `pyoz build`, `pyoz publish`
 
@@ -89,12 +91,18 @@ Full documentation available at **[pyoz.dev](https://pyoz.dev)**
 - [Classes](https://pyoz.dev/guide/classes/)
 - [NumPy Integration](https://pyoz.dev/guide/numpy/)
 - [Error Handling](https://pyoz.dev/guide/errors/)
+- [Async](https://pyoz.dev/guide/async/)
+- [Free-Threading](https://pyoz.dev/guide/free-threading/)
 - [CLI Reference](https://pyoz.dev/cli/build/)
+
+## Upgrading
+
+Coming from PyOZ 0.12? See [Upgrading to 0.13](https://pyoz.dev/upgrading/): Zig 0.16, Python 3.10+, and a few `build.zig` edits.
 
 ## Requirements
 
-- Zig 0.15.0+
-- Python 3.8 - 3.13
+- Zig 0.16.x (Zig changes incompatibly between minor releases)
+- Python 3.10 - 3.14
 
 ## License
 

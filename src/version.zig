@@ -2,11 +2,16 @@
 // This file is automatically parsed by build.zig for embed and metadata
 
 pub const major: u8 = 0;
-pub const minor: u8 = 12;
-pub const patch: u8 = 2;
+pub const minor: u8 = 13;
+pub const patch: u8 = 0;
 
 /// Pre-release identifier (e.g., "alpha", "beta", "rc1", or null for release)
 pub const pre_release: ?[]const u8 = null;
+
+/// Zig release PyOZ builds with (Zig has no compatibility guarantee between
+/// minor releases). Every other copy (build.zig.zon files, the pip backend,
+/// CI workflows) is checked against this by the "Zig version pins" CLI test.
+pub const zig: []const u8 = "0.16.0";
 
 /// Build metadata (e.g., git commit hash, set at build time)
 pub const build_metadata: ?[]const u8 = null;

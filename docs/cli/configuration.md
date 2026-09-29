@@ -23,7 +23,7 @@ Zig package manifest defining project metadata and dependencies:
     .version = "0.1.0",
     .dependencies = .{
         .PyOZ = .{
-            .url = "https://github.com/pyozig/PyOZ/archive/refs/tags/v0.12.2.tar.gz",
+            .url = "https://github.com/pyozig/PyOZ/archive/refs/tags/v0.13.0.tar.gz",
             .hash = "1220abc123...",
         },
     },
@@ -46,7 +46,7 @@ Python package metadata:
 name = "myproject"
 version = "0.1.0"
 description = "My PyOZ module"
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 
 [build-system]
 requires = ["pyoz"]
@@ -78,11 +78,14 @@ module-path = "src/lib.zig"
 # Strip debug symbols in release builds
 # strip = true
 
-# Enable ABI3 (Stable ABI) for cross-version compatibility
+# Enable ABI3 (Stable ABI) for cross-version compatibility (cp310-abi3 wheels;
+# not available with free-threaded interpreters)
 # abi3 = true
 
-# Linux platform tag for wheel builds
-# linux-platform-tag = "manylinux_2_17_x86_64"
+# Oldest glibc Linux wheels may require, as a manylinux tag (default:
+# manylinux_2_17, i.e. glibc 2.17). "linux_x86_64" builds a native,
+# non-portable wheel instead (PyPI rejects those).
+# linux-platform-tag = "manylinux_2_28_x86_64"
 ```
 
 ### Package Layout with `module-name`
@@ -207,10 +210,10 @@ Update version in both:
 
 ## Python Version Support
 
-PyOZ supports Python 3.8 through 3.13. Specify minimum version in pyproject.toml:
+PyOZ supports Python 3.10 through 3.14. Specify minimum version in pyproject.toml:
 
 ```toml
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 ```
 
 ## Next Steps

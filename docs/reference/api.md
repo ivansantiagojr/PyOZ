@@ -19,8 +19,14 @@ pub const MyModule = pyoz.module(.{
     .consts = &.{ ... },          // Optional: constants
     .exceptions = &.{ ... },      // Optional: custom exceptions
     .error_mappings = &.{ ... },  // Optional: error->exception mappings
+    .gil_used = false,            // Optional: safe without the GIL (free-threaded CPython)
 });
 ```
+
+`.gil_used = false` declares that the module can run without the GIL on
+free-threaded CPython (3.13t/3.14t); without it, importing the module re-enables
+the GIL for the whole process. It has no effect on regular builds. See
+[Free-Threading](../guide/free-threading.md).
 
 ## Auto-Scan (`.from`)
 
@@ -110,6 +116,18 @@ Define a basic function.
 pyoz.func("add", add, "Add two numbers")
 ```
 
+### `.withParams(names)`
+
+Name the Python-visible parameters of a `pyoz.func` entry. Zig reflection cannot
+recover parameter names, so without it they appear as `arg0, arg1, ...` in
+stubs and `help()`:
+
+```zig
+pyoz.func("fetch", pyoz.asyncFn(fetch), "Sleep, then add").withParams("delay_ms, a, b"),
+```
+
+For methods, use `pub const method__params__ = "a, b";` on the class.
+
 ### `pyoz.kwfunc(name, fn, doc)`
 
 Define a function with named keyword arguments using `Args(T)`.
@@ -124,6 +142,51 @@ fn greet(args: pyoz.Args(GreetArgs)) []const u8 { ... }
 
 pyoz.kwfunc("greet", greet, "Greet someone")
 ```
+
+## Async
+
+See the [Async guide](../guide/async.md) for semantics, cancellation and
+performance.
+
+### `pyoz.asyncFn(f)`
+
+Wrap a Zig function so that calling it from Python returns an `asyncio.Future`.
+`f` runs on its own `std.Io` task without the GIL. Optional leading parameters:
+`std.Io` and `std.mem.Allocator` (per-call arena). Up to 8 Python-visible
+parameters, copied at call time.
+
+```zig
+fn fetch(io: std.Io, ms: i64, a: i64, b: i64) !i64 {
+    try io.sleep(.fromMilliseconds(ms), .awake);
+    return a + b;
+}
+.funcs = &.{ pyoz.func("fetch", pyoz.asyncFn(fetch), "Sleep, then add") },
+```
+
+### `pyoz.asyncMethod(f)`
+
+Async instance method. The `self` parameter type is the safety contract:
+`self: T` runs on a copy; `self: *const T` borrows the object (frozen classes
+without `*T` methods only); `self: *T` is a compile error.
+
+```zig
+fn slowNormImpl(self: *const Vec, io: std.Io) !f64 { ... }
+pub const slow_norm = pyoz.asyncMethod(slowNormImpl);
+```
+
+### `pyoz.io()`
+
+The process-wide `std.Io` runtime used by async functions; also usable from
+synchronous functions.
+
+### `pyoz.setAsyncConcurrency(n)`
+
+Maximum number of async jobs running at once (default 256; further calls
+queue). Must be called before the first async call; returns `false` otherwise.
+
+### `pyoz.asyncLiveJobs()`
+
+Number of async jobs not yet fully cleaned up. Useful for leak checks in tests.
 
 ## Classes
 
@@ -250,15 +313,26 @@ All raise functions: `raiseValueError`, `raiseTypeError`, `raiseRuntimeError`, `
 
 ### `pyoz.fmt(comptime format, args)`
 
-Inline string formatter using Zig's `std.fmt` syntax. Returns `[*:0]const u8`.
+Lazily formatted message using Zig's `std.fmt` syntax. Returns a
+`pyoz.Formatted(format, @TypeOf(args))` value that captures the arguments and
+formats nothing until it is consumed: by any `raise*` function, or when it is
+returned from a function or method and converted to a Python `str`.
 
 ```zig
-// Use with raise functions for dynamic error messages:
+// With raise functions:
 return pyoz.raiseValueError(pyoz.fmt("value {d} exceeds limit {d}", .{ val, limit }));
 
-// General formatting:
-const msg = pyoz.fmt("hello {s}", .{"world"});
+// As a return type (the format is written once, in the signature):
+pub fn __repr__(self: *const Vec2) pyoz.Formatted("Vec2({d:.2}, {d:.2})", struct { f64, f64 }) {
+    return .{ .args = .{ self.x, self.y } };
+}
 ```
+
+Messages up to 512 bytes are formatted on the consumer's stack with no heap
+allocation; longer ones use one exact-size allocation and are never truncated.
+Slices inside `args` must still be valid when the value is consumed (slices
+into `self` are fine; slices into a local buffer of the returning function are
+not). To format into your own buffer, use `std.fmt.bufPrintZ`.
 
 ### Catching Exceptions
 
@@ -308,6 +382,8 @@ pyoz.mapErrorMsg("InvalidInput", .ValueError, "Input is invalid")
 | `pyoz.Dict(K, V)` | `dict` |
 | `pyoz.Set(T)` | `set` |
 | `pyoz.FrozenSet(T)` | `frozenset` |
+
+| `pyoz.Formatted(fmt, Args)` | `str` (from `pyoz.fmt`) |
 
 ### Special Types
 
@@ -418,6 +494,10 @@ defer gil.acquire();
 // Work without GIL
 ```
 
+On free-threaded CPython there is no GIL to release, but the call still detaches
+the thread state, which also suspends the per-object critical section of the
+method being executed (see [Free-Threading](../guide/free-threading.md)).
+
 ### `pyoz.acquireGIL()`
 
 Acquire GIL from non-Python thread.
@@ -466,6 +546,8 @@ Other: `__repr__`, `__str__`, `__hash__`, `__bool__`, `__call__`, `__enter__`, `
 const MyClass = struct {
     pub const __doc__: [*:0]const u8 = "Class docstring";
     pub const __frozen__: bool = true;  // Immutable
+    pub const __lock__: bool = false;   // Free-threaded builds: skip per-object locking
+    pub const __freelist__ = 8;         // Object pool (ignored on free-threaded builds)
     pub const __features__ = .{ .dict = true, .weakref = true };
     pub const __base__ = pyoz.bases.list;  // Inherit from builtin
     pub const __base__ = pyoz.base(Parent);  // Inherit from PyOZ class

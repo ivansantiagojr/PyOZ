@@ -315,5 +315,5 @@ mymodule/
 ├── build.zig.zon
 ├── pyproject.toml
 └── dist/
-    └── mymodule-1.0.0-cp311-cp311-linux_x86_64.whl
+    └── mymodule-1.0.0-cp311-cp311-manylinux_2_17_x86_64.whl
 ```

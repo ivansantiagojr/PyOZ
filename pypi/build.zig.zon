@@ -1,7 +1,8 @@
 .{
     .name = .pyoz,
-    .version = "0.12.2",
+    .version = "0.13.0",
     .fingerprint = 0x43eec3150282fd1f,
+    .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .PyOZ = .{
             .path = "..",

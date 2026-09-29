@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const py = @import("../python.zig");
+const ft = @import("threading.zig");
 const conversion = @import("../conversion.zig");
 const slots = py.slots;
 
@@ -52,42 +53,42 @@ pub fn NumberProtocol(comptime _: [*:0]const u8, comptime T: type, comptime Pare
         fn makeNumberMethods() py.c.PyNumberMethods {
             var nm: py.c.PyNumberMethods = std.mem.zeroes(py.c.PyNumberMethods);
 
-            if (@hasDecl(T, "__add__")) nm.nb_add = @ptrCast(&py_nb_add);
-            if (@hasDecl(T, "__sub__")) nm.nb_subtract = @ptrCast(&py_nb_sub);
-            if (@hasDecl(T, "__mul__")) nm.nb_multiply = @ptrCast(&py_nb_mul);
-            if (@hasDecl(T, "__neg__")) nm.nb_negative = @ptrCast(&py_nb_neg);
-            if (@hasDecl(T, "__truediv__")) nm.nb_true_divide = @ptrCast(&py_nb_truediv);
-            if (@hasDecl(T, "__floordiv__")) nm.nb_floor_divide = @ptrCast(&py_nb_floordiv);
-            if (@hasDecl(T, "__mod__")) nm.nb_remainder = @ptrCast(&py_nb_mod);
-            if (@hasDecl(T, "__divmod__")) nm.nb_divmod = @ptrCast(&py_nb_divmod);
-            if (@hasDecl(T, "__bool__")) nm.nb_bool = @ptrCast(&py_nb_bool);
-            if (@hasDecl(T, "__pow__")) nm.nb_power = @ptrCast(&py_nb_pow);
-            if (@hasDecl(T, "__pos__")) nm.nb_positive = @ptrCast(&py_nb_pos);
-            if (@hasDecl(T, "__abs__")) nm.nb_absolute = @ptrCast(&py_nb_abs);
-            if (@hasDecl(T, "__invert__")) nm.nb_invert = @ptrCast(&py_nb_invert);
-            if (@hasDecl(T, "__lshift__")) nm.nb_lshift = @ptrCast(&py_nb_lshift);
-            if (@hasDecl(T, "__rshift__")) nm.nb_rshift = @ptrCast(&py_nb_rshift);
-            if (@hasDecl(T, "__and__")) nm.nb_and = @ptrCast(&py_nb_and);
-            if (@hasDecl(T, "__or__")) nm.nb_or = @ptrCast(&py_nb_or);
-            if (@hasDecl(T, "__xor__")) nm.nb_xor = @ptrCast(&py_nb_xor);
-            if (@hasDecl(T, "__matmul__")) nm.nb_matrix_multiply = @ptrCast(&py_nb_matmul);
-            if (@hasDecl(T, "__int__")) nm.nb_int = @ptrCast(&py_nb_int);
-            if (@hasDecl(T, "__float__")) nm.nb_float = @ptrCast(&py_nb_float);
-            if (@hasDecl(T, "__index__")) nm.nb_index = @ptrCast(&py_nb_index);
+            if (@hasDecl(T, "__add__")) nm.nb_add = @ptrCast(ft.locked2(T, py_nb_add));
+            if (@hasDecl(T, "__sub__")) nm.nb_subtract = @ptrCast(ft.locked2(T, py_nb_sub));
+            if (@hasDecl(T, "__mul__")) nm.nb_multiply = @ptrCast(ft.locked2(T, py_nb_mul));
+            if (@hasDecl(T, "__neg__")) nm.nb_negative = @ptrCast(ft.locked(T, py_nb_neg));
+            if (@hasDecl(T, "__truediv__")) nm.nb_true_divide = @ptrCast(ft.locked2(T, py_nb_truediv));
+            if (@hasDecl(T, "__floordiv__")) nm.nb_floor_divide = @ptrCast(ft.locked2(T, py_nb_floordiv));
+            if (@hasDecl(T, "__mod__")) nm.nb_remainder = @ptrCast(ft.locked2(T, py_nb_mod));
+            if (@hasDecl(T, "__divmod__")) nm.nb_divmod = @ptrCast(ft.locked2(T, py_nb_divmod));
+            if (@hasDecl(T, "__bool__")) nm.nb_bool = @ptrCast(ft.locked(T, py_nb_bool));
+            if (@hasDecl(T, "__pow__")) nm.nb_power = @ptrCast(ft.locked2(T, py_nb_pow));
+            if (@hasDecl(T, "__pos__")) nm.nb_positive = @ptrCast(ft.locked(T, py_nb_pos));
+            if (@hasDecl(T, "__abs__")) nm.nb_absolute = @ptrCast(ft.locked(T, py_nb_abs));
+            if (@hasDecl(T, "__invert__")) nm.nb_invert = @ptrCast(ft.locked(T, py_nb_invert));
+            if (@hasDecl(T, "__lshift__")) nm.nb_lshift = @ptrCast(ft.locked2(T, py_nb_lshift));
+            if (@hasDecl(T, "__rshift__")) nm.nb_rshift = @ptrCast(ft.locked2(T, py_nb_rshift));
+            if (@hasDecl(T, "__and__")) nm.nb_and = @ptrCast(ft.locked2(T, py_nb_and));
+            if (@hasDecl(T, "__or__")) nm.nb_or = @ptrCast(ft.locked2(T, py_nb_or));
+            if (@hasDecl(T, "__xor__")) nm.nb_xor = @ptrCast(ft.locked2(T, py_nb_xor));
+            if (@hasDecl(T, "__matmul__")) nm.nb_matrix_multiply = @ptrCast(ft.locked2(T, py_nb_matmul));
+            if (@hasDecl(T, "__int__")) nm.nb_int = @ptrCast(ft.locked(T, py_nb_int));
+            if (@hasDecl(T, "__float__")) nm.nb_float = @ptrCast(ft.locked(T, py_nb_float));
+            if (@hasDecl(T, "__index__")) nm.nb_index = @ptrCast(ft.locked(T, py_nb_index));
             // In-place operators
-            if (@hasDecl(T, "__iadd__")) nm.nb_inplace_add = @ptrCast(&py_nb_iadd);
-            if (@hasDecl(T, "__isub__")) nm.nb_inplace_subtract = @ptrCast(&py_nb_isub);
-            if (@hasDecl(T, "__imul__")) nm.nb_inplace_multiply = @ptrCast(&py_nb_imul);
-            if (@hasDecl(T, "__itruediv__")) nm.nb_inplace_true_divide = @ptrCast(&py_nb_itruediv);
-            if (@hasDecl(T, "__ifloordiv__")) nm.nb_inplace_floor_divide = @ptrCast(&py_nb_ifloordiv);
-            if (@hasDecl(T, "__imod__")) nm.nb_inplace_remainder = @ptrCast(&py_nb_imod);
-            if (@hasDecl(T, "__ipow__")) nm.nb_inplace_power = @ptrCast(&py_nb_ipow);
-            if (@hasDecl(T, "__ilshift__")) nm.nb_inplace_lshift = @ptrCast(&py_nb_ilshift);
-            if (@hasDecl(T, "__irshift__")) nm.nb_inplace_rshift = @ptrCast(&py_nb_irshift);
-            if (@hasDecl(T, "__iand__")) nm.nb_inplace_and = @ptrCast(&py_nb_iand);
-            if (@hasDecl(T, "__ior__")) nm.nb_inplace_or = @ptrCast(&py_nb_ior);
-            if (@hasDecl(T, "__ixor__")) nm.nb_inplace_xor = @ptrCast(&py_nb_ixor);
-            if (@hasDecl(T, "__imatmul__")) nm.nb_inplace_matrix_multiply = @ptrCast(&py_nb_imatmul);
+            if (@hasDecl(T, "__iadd__")) nm.nb_inplace_add = @ptrCast(ft.locked2(T, py_nb_iadd));
+            if (@hasDecl(T, "__isub__")) nm.nb_inplace_subtract = @ptrCast(ft.locked2(T, py_nb_isub));
+            if (@hasDecl(T, "__imul__")) nm.nb_inplace_multiply = @ptrCast(ft.locked2(T, py_nb_imul));
+            if (@hasDecl(T, "__itruediv__")) nm.nb_inplace_true_divide = @ptrCast(ft.locked2(T, py_nb_itruediv));
+            if (@hasDecl(T, "__ifloordiv__")) nm.nb_inplace_floor_divide = @ptrCast(ft.locked2(T, py_nb_ifloordiv));
+            if (@hasDecl(T, "__imod__")) nm.nb_inplace_remainder = @ptrCast(ft.locked2(T, py_nb_imod));
+            if (@hasDecl(T, "__ipow__")) nm.nb_inplace_power = @ptrCast(ft.locked2(T, py_nb_ipow));
+            if (@hasDecl(T, "__ilshift__")) nm.nb_inplace_lshift = @ptrCast(ft.locked2(T, py_nb_ilshift));
+            if (@hasDecl(T, "__irshift__")) nm.nb_inplace_rshift = @ptrCast(ft.locked2(T, py_nb_irshift));
+            if (@hasDecl(T, "__iand__")) nm.nb_inplace_and = @ptrCast(ft.locked2(T, py_nb_iand));
+            if (@hasDecl(T, "__ior__")) nm.nb_inplace_or = @ptrCast(ft.locked2(T, py_nb_ior));
+            if (@hasDecl(T, "__ixor__")) nm.nb_inplace_xor = @ptrCast(ft.locked2(T, py_nb_ixor));
+            if (@hasDecl(T, "__imatmul__")) nm.nb_inplace_matrix_multiply = @ptrCast(ft.locked2(T, py_nb_imatmul));
 
             return nm;
         }
@@ -431,144 +432,144 @@ pub fn NumberProtocol(comptime _: [*:0]const u8, comptime T: type, comptime Pare
             var idx = start_idx;
 
             if (@hasDecl(T, "__add__")) {
-                slot_array[idx] = .{ .slot = slots.nb_add, .pfunc = @ptrCast(@constCast(&py_nb_add)) };
+                slot_array[idx] = .{ .slot = slots.nb_add, .pfunc = @ptrCast(@constCast(ft.locked2(T, py_nb_add))) };
                 idx += 1;
             }
             if (@hasDecl(T, "__sub__")) {
-                slot_array[idx] = .{ .slot = slots.nb_subtract, .pfunc = @ptrCast(@constCast(&py_nb_sub)) };
+                slot_array[idx] = .{ .slot = slots.nb_subtract, .pfunc = @ptrCast(@constCast(ft.locked2(T, py_nb_sub))) };
                 idx += 1;
             }
             if (@hasDecl(T, "__mul__")) {
-                slot_array[idx] = .{ .slot = slots.nb_multiply, .pfunc = @ptrCast(@constCast(&py_nb_mul)) };
+                slot_array[idx] = .{ .slot = slots.nb_multiply, .pfunc = @ptrCast(@constCast(ft.locked2(T, py_nb_mul))) };
                 idx += 1;
             }
             if (@hasDecl(T, "__neg__")) {
-                slot_array[idx] = .{ .slot = slots.nb_negative, .pfunc = @ptrCast(@constCast(&py_nb_neg)) };
+                slot_array[idx] = .{ .slot = slots.nb_negative, .pfunc = @ptrCast(@constCast(ft.locked(T, py_nb_neg))) };
                 idx += 1;
             }
             if (@hasDecl(T, "__truediv__")) {
-                slot_array[idx] = .{ .slot = slots.nb_true_divide, .pfunc = @ptrCast(@constCast(&py_nb_truediv)) };
+                slot_array[idx] = .{ .slot = slots.nb_true_divide, .pfunc = @ptrCast(@constCast(ft.locked2(T, py_nb_truediv))) };
                 idx += 1;
             }
             if (@hasDecl(T, "__floordiv__")) {
-                slot_array[idx] = .{ .slot = slots.nb_floor_divide, .pfunc = @ptrCast(@constCast(&py_nb_floordiv)) };
+                slot_array[idx] = .{ .slot = slots.nb_floor_divide, .pfunc = @ptrCast(@constCast(ft.locked2(T, py_nb_floordiv))) };
                 idx += 1;
             }
             if (@hasDecl(T, "__mod__")) {
-                slot_array[idx] = .{ .slot = slots.nb_remainder, .pfunc = @ptrCast(@constCast(&py_nb_mod)) };
+                slot_array[idx] = .{ .slot = slots.nb_remainder, .pfunc = @ptrCast(@constCast(ft.locked2(T, py_nb_mod))) };
                 idx += 1;
             }
             if (@hasDecl(T, "__divmod__")) {
-                slot_array[idx] = .{ .slot = slots.nb_divmod, .pfunc = @ptrCast(@constCast(&py_nb_divmod)) };
+                slot_array[idx] = .{ .slot = slots.nb_divmod, .pfunc = @ptrCast(@constCast(ft.locked2(T, py_nb_divmod))) };
                 idx += 1;
             }
             if (@hasDecl(T, "__bool__")) {
-                slot_array[idx] = .{ .slot = slots.nb_bool, .pfunc = @ptrCast(@constCast(&py_nb_bool)) };
+                slot_array[idx] = .{ .slot = slots.nb_bool, .pfunc = @ptrCast(@constCast(ft.locked(T, py_nb_bool))) };
                 idx += 1;
             }
             if (@hasDecl(T, "__pow__")) {
-                slot_array[idx] = .{ .slot = slots.nb_power, .pfunc = @ptrCast(@constCast(&py_nb_pow)) };
+                slot_array[idx] = .{ .slot = slots.nb_power, .pfunc = @ptrCast(@constCast(ft.locked2(T, py_nb_pow))) };
                 idx += 1;
             }
             if (@hasDecl(T, "__pos__")) {
-                slot_array[idx] = .{ .slot = slots.nb_positive, .pfunc = @ptrCast(@constCast(&py_nb_pos)) };
+                slot_array[idx] = .{ .slot = slots.nb_positive, .pfunc = @ptrCast(@constCast(ft.locked(T, py_nb_pos))) };
                 idx += 1;
             }
             if (@hasDecl(T, "__abs__")) {
-                slot_array[idx] = .{ .slot = slots.nb_absolute, .pfunc = @ptrCast(@constCast(&py_nb_abs)) };
+                slot_array[idx] = .{ .slot = slots.nb_absolute, .pfunc = @ptrCast(@constCast(ft.locked(T, py_nb_abs))) };
                 idx += 1;
             }
             if (@hasDecl(T, "__invert__")) {
-                slot_array[idx] = .{ .slot = slots.nb_invert, .pfunc = @ptrCast(@constCast(&py_nb_invert)) };
+                slot_array[idx] = .{ .slot = slots.nb_invert, .pfunc = @ptrCast(@constCast(ft.locked(T, py_nb_invert))) };
                 idx += 1;
             }
             if (@hasDecl(T, "__lshift__")) {
-                slot_array[idx] = .{ .slot = slots.nb_lshift, .pfunc = @ptrCast(@constCast(&py_nb_lshift)) };
+                slot_array[idx] = .{ .slot = slots.nb_lshift, .pfunc = @ptrCast(@constCast(ft.locked2(T, py_nb_lshift))) };
                 idx += 1;
             }
             if (@hasDecl(T, "__rshift__")) {
-                slot_array[idx] = .{ .slot = slots.nb_rshift, .pfunc = @ptrCast(@constCast(&py_nb_rshift)) };
+                slot_array[idx] = .{ .slot = slots.nb_rshift, .pfunc = @ptrCast(@constCast(ft.locked2(T, py_nb_rshift))) };
                 idx += 1;
             }
             if (@hasDecl(T, "__and__")) {
-                slot_array[idx] = .{ .slot = slots.nb_and, .pfunc = @ptrCast(@constCast(&py_nb_and)) };
+                slot_array[idx] = .{ .slot = slots.nb_and, .pfunc = @ptrCast(@constCast(ft.locked2(T, py_nb_and))) };
                 idx += 1;
             }
             if (@hasDecl(T, "__or__")) {
-                slot_array[idx] = .{ .slot = slots.nb_or, .pfunc = @ptrCast(@constCast(&py_nb_or)) };
+                slot_array[idx] = .{ .slot = slots.nb_or, .pfunc = @ptrCast(@constCast(ft.locked2(T, py_nb_or))) };
                 idx += 1;
             }
             if (@hasDecl(T, "__xor__")) {
-                slot_array[idx] = .{ .slot = slots.nb_xor, .pfunc = @ptrCast(@constCast(&py_nb_xor)) };
+                slot_array[idx] = .{ .slot = slots.nb_xor, .pfunc = @ptrCast(@constCast(ft.locked2(T, py_nb_xor))) };
                 idx += 1;
             }
             if (@hasDecl(T, "__matmul__")) {
-                slot_array[idx] = .{ .slot = slots.nb_matrix_multiply, .pfunc = @ptrCast(@constCast(&py_nb_matmul)) };
+                slot_array[idx] = .{ .slot = slots.nb_matrix_multiply, .pfunc = @ptrCast(@constCast(ft.locked2(T, py_nb_matmul))) };
                 idx += 1;
             }
             if (@hasDecl(T, "__int__")) {
-                slot_array[idx] = .{ .slot = slots.nb_int, .pfunc = @ptrCast(@constCast(&py_nb_int)) };
+                slot_array[idx] = .{ .slot = slots.nb_int, .pfunc = @ptrCast(@constCast(ft.locked(T, py_nb_int))) };
                 idx += 1;
             }
             if (@hasDecl(T, "__float__")) {
-                slot_array[idx] = .{ .slot = slots.nb_float, .pfunc = @ptrCast(@constCast(&py_nb_float)) };
+                slot_array[idx] = .{ .slot = slots.nb_float, .pfunc = @ptrCast(@constCast(ft.locked(T, py_nb_float))) };
                 idx += 1;
             }
             if (@hasDecl(T, "__index__")) {
-                slot_array[idx] = .{ .slot = slots.nb_index, .pfunc = @ptrCast(@constCast(&py_nb_index)) };
+                slot_array[idx] = .{ .slot = slots.nb_index, .pfunc = @ptrCast(@constCast(ft.locked(T, py_nb_index))) };
                 idx += 1;
             }
             // In-place operators
             if (@hasDecl(T, "__iadd__")) {
-                slot_array[idx] = .{ .slot = slots.nb_inplace_add, .pfunc = @ptrCast(@constCast(&py_nb_iadd)) };
+                slot_array[idx] = .{ .slot = slots.nb_inplace_add, .pfunc = @ptrCast(@constCast(ft.locked2(T, py_nb_iadd))) };
                 idx += 1;
             }
             if (@hasDecl(T, "__isub__")) {
-                slot_array[idx] = .{ .slot = slots.nb_inplace_subtract, .pfunc = @ptrCast(@constCast(&py_nb_isub)) };
+                slot_array[idx] = .{ .slot = slots.nb_inplace_subtract, .pfunc = @ptrCast(@constCast(ft.locked2(T, py_nb_isub))) };
                 idx += 1;
             }
             if (@hasDecl(T, "__imul__")) {
-                slot_array[idx] = .{ .slot = slots.nb_inplace_multiply, .pfunc = @ptrCast(@constCast(&py_nb_imul)) };
+                slot_array[idx] = .{ .slot = slots.nb_inplace_multiply, .pfunc = @ptrCast(@constCast(ft.locked2(T, py_nb_imul))) };
                 idx += 1;
             }
             if (@hasDecl(T, "__itruediv__")) {
-                slot_array[idx] = .{ .slot = slots.nb_inplace_true_divide, .pfunc = @ptrCast(@constCast(&py_nb_itruediv)) };
+                slot_array[idx] = .{ .slot = slots.nb_inplace_true_divide, .pfunc = @ptrCast(@constCast(ft.locked2(T, py_nb_itruediv))) };
                 idx += 1;
             }
             if (@hasDecl(T, "__ifloordiv__")) {
-                slot_array[idx] = .{ .slot = slots.nb_inplace_floor_divide, .pfunc = @ptrCast(@constCast(&py_nb_ifloordiv)) };
+                slot_array[idx] = .{ .slot = slots.nb_inplace_floor_divide, .pfunc = @ptrCast(@constCast(ft.locked2(T, py_nb_ifloordiv))) };
                 idx += 1;
             }
             if (@hasDecl(T, "__imod__")) {
-                slot_array[idx] = .{ .slot = slots.nb_inplace_remainder, .pfunc = @ptrCast(@constCast(&py_nb_imod)) };
+                slot_array[idx] = .{ .slot = slots.nb_inplace_remainder, .pfunc = @ptrCast(@constCast(ft.locked2(T, py_nb_imod))) };
                 idx += 1;
             }
             if (@hasDecl(T, "__ipow__")) {
-                slot_array[idx] = .{ .slot = slots.nb_inplace_power, .pfunc = @ptrCast(@constCast(&py_nb_ipow)) };
+                slot_array[idx] = .{ .slot = slots.nb_inplace_power, .pfunc = @ptrCast(@constCast(ft.locked2(T, py_nb_ipow))) };
                 idx += 1;
             }
             if (@hasDecl(T, "__ilshift__")) {
-                slot_array[idx] = .{ .slot = slots.nb_inplace_lshift, .pfunc = @ptrCast(@constCast(&py_nb_ilshift)) };
+                slot_array[idx] = .{ .slot = slots.nb_inplace_lshift, .pfunc = @ptrCast(@constCast(ft.locked2(T, py_nb_ilshift))) };
                 idx += 1;
             }
             if (@hasDecl(T, "__irshift__")) {
-                slot_array[idx] = .{ .slot = slots.nb_inplace_rshift, .pfunc = @ptrCast(@constCast(&py_nb_irshift)) };
+                slot_array[idx] = .{ .slot = slots.nb_inplace_rshift, .pfunc = @ptrCast(@constCast(ft.locked2(T, py_nb_irshift))) };
                 idx += 1;
             }
             if (@hasDecl(T, "__iand__")) {
-                slot_array[idx] = .{ .slot = slots.nb_inplace_and, .pfunc = @ptrCast(@constCast(&py_nb_iand)) };
+                slot_array[idx] = .{ .slot = slots.nb_inplace_and, .pfunc = @ptrCast(@constCast(ft.locked2(T, py_nb_iand))) };
                 idx += 1;
             }
             if (@hasDecl(T, "__ior__")) {
-                slot_array[idx] = .{ .slot = slots.nb_inplace_or, .pfunc = @ptrCast(@constCast(&py_nb_ior)) };
+                slot_array[idx] = .{ .slot = slots.nb_inplace_or, .pfunc = @ptrCast(@constCast(ft.locked2(T, py_nb_ior))) };
                 idx += 1;
             }
             if (@hasDecl(T, "__ixor__")) {
-                slot_array[idx] = .{ .slot = slots.nb_inplace_xor, .pfunc = @ptrCast(@constCast(&py_nb_ixor)) };
+                slot_array[idx] = .{ .slot = slots.nb_inplace_xor, .pfunc = @ptrCast(@constCast(ft.locked2(T, py_nb_ixor))) };
                 idx += 1;
             }
             if (@hasDecl(T, "__imatmul__")) {
-                slot_array[idx] = .{ .slot = slots.nb_inplace_matrix_multiply, .pfunc = @ptrCast(@constCast(&py_nb_imatmul)) };
+                slot_array[idx] = .{ .slot = slots.nb_inplace_matrix_multiply, .pfunc = @ptrCast(@constCast(ft.locked2(T, py_nb_imatmul))) };
                 idx += 1;
             }
 

@@ -16,6 +16,7 @@ const std = @import("std");
 const ref_mod = @import("ref.zig");
 const from_mod = @import("from.zig");
 const source_parser_mod = @import("source_parser.zig");
+const awaitable = @import("awaitable.zig");
 
 /// How keyword arguments are handled for a function.
 pub const KwargsMode = enum {
@@ -109,6 +110,103 @@ fn resolveReturnType(comptime fn_info: anytype) []const u8 {
 // =============================================================================
 // Type Mapping: Zig Types -> Python Type Strings
 // =============================================================================
+
+/// Python type an async dunder's awaitable resolves to (`self` -> class name).
+fn asyncResultStub(comptime name: []const u8, comptime T: type, comptime dunder: []const u8, comptime mode: awaitable.Mode) []const u8 {
+    const R = @typeInfo(@TypeOf(@field(T, dunder))).@"fn".return_type.?;
+    if (@typeInfo(R) == .@"struct" and @hasDecl(R, "_is_pyoz_signature")) return R.stub_type;
+    const V = awaitable.ResolvedType(R, mode);
+    if (V == void) return "None";
+    const is_self = struct {
+        fn f(comptime P: type) bool {
+            return @typeInfo(P) == .pointer and @typeInfo(P).pointer.size == .one and @typeInfo(P).pointer.child == T;
+        }
+    }.f;
+    if (is_self(V)) return name;
+    if (@typeInfo(V) == .optional and is_self(@typeInfo(V).optional.child)) return name ++ " | None";
+    return zigTypeToPython(V);
+}
+
+fn isArgsType(comptime T: type) bool {
+    return @typeInfo(T) == .@"struct" and @hasDecl(T, "is_pyoz_args");
+}
+
+/// Stub parameters for a `pyoz.Args(S)` parameter: one per field of S, with
+/// `= ...` for fields that have a default and `= None` for optionals.
+fn argsStubParams(comptime ArgsWrapper: type) []const u8 {
+    comptime {
+        var result: []const u8 = "";
+        for (@typeInfo(ArgsWrapper.ArgsStruct).@"struct".fields, 0..) |field, i| {
+            if (i > 0) result = result ++ ", ";
+            const info = @typeInfo(field.type);
+            result = result ++ field.name ++ ": " ++ if (info == .optional)
+                zigParamTypeToPython(info.optional.child) ++ " | None"
+            else
+                zigParamTypeToPython(field.type);
+            if (field.default_value_ptr != null) {
+                result = result ++ " = ...";
+            } else if (info == .optional) {
+                result = result ++ " = None";
+            }
+        }
+        return result;
+    }
+}
+
+/// Default shown in help() for an Args field: a Python literal when the Zig
+/// default is one (numbers, bools, strings, null), "..." otherwise, null for
+/// a required field.
+fn argDefaultLiteral(comptime field: std.builtin.Type.StructField) ?[]const u8 {
+    comptime {
+        const default = field.defaultValue() orelse
+            return if (@typeInfo(field.type) == .optional) "None" else null;
+        return pyLiteral(field.type, default) orelse "...";
+    }
+}
+
+fn pyLiteral(comptime V: type, comptime value: V) ?[]const u8 {
+    comptime {
+        switch (@typeInfo(V)) {
+            .bool => return if (value) "True" else "False",
+            .int, .comptime_int => return std.fmt.comptimePrint("{d}", .{value}),
+            .float, .comptime_float => {
+                if (std.math.isNan(value) or std.math.isInf(value)) return null;
+                const text = std.fmt.comptimePrint("{d}", .{value});
+                // 2.0 formats as "2"; keep it a float in Python
+                return if (std.mem.indexOfAny(u8, text, ".e") == null) text ++ ".0" else text;
+            },
+            .optional => |o| return if (value) |v| pyLiteral(o.child, v) else "None",
+            .pointer => |p| {
+                const bytes: []const u8 = if (p.size == .slice and p.child == u8)
+                    value
+                else if (p.size == .one and @typeInfo(p.child) == .array and @typeInfo(p.child).array.child == u8)
+                    value
+                else
+                    return null;
+                var out: []const u8 = "'";
+                for (bytes) |c| {
+                    if (c < 0x20 or c >= 0x7f) return null; // keep it simple: printable ASCII only
+                    out = out ++ switch (c) {
+                        '\\' => "\\\\",
+                        '\'' => "\\'",
+                        else => &[_]u8{c},
+                    };
+                }
+                return out ++ "'";
+            },
+            else => return null,
+        }
+    }
+}
+
+/// Like zigTypeToPython, for parameters: fixed-size arrays accept a list or a tuple.
+fn zigParamTypeToPython(comptime T: type) []const u8 {
+    if (@typeInfo(T) == .array) {
+        const child = zigTypeToPython(@typeInfo(T).array.child);
+        return "list[" ++ child ++ "] | tuple[" ++ child ++ ", ...]";
+    }
+    return zigTypeToPython(T);
+}
 
 /// Map a Zig type to its Python type annotation string
 pub fn zigTypeToPython(comptime T: type) []const u8 {
@@ -208,6 +306,8 @@ fn mapStructType(comptime T: type) []const u8 {
     if (@hasDecl(T, "_is_pyoz_bytearray")) return "bytearray";
     if (@hasDecl(T, "_is_pyoz_bytes")) return "bytes";
     if (@hasDecl(T, "_is_pyoz_path")) return "pathlib.Path";
+    if (@hasDecl(T, "_is_pyoz_fmt")) return "str";
+    if (@hasDecl(T, "_is_pyoz_async_pending")) return "Awaitable[" ++ zigTypeToPython(T.Result) ++ "]";
     if (@hasDecl(T, "_is_pyoz_decimal")) return "decimal.Decimal";
 
     // Collection types - check by declaration pattern
@@ -269,9 +369,10 @@ fn mapStructType(comptime T: type) []const u8 {
         return "numpy.ndarray[Any, Any]";
     }
 
-    // Args wrapper - should be expanded by caller
+    // Args wrappers are expanded into their fields by the callers
+    // (argsStubParams); "Any" keeps a stub valid if one is ever missed.
     if (@hasDecl(T, "is_pyoz_args") and T.is_pyoz_args) {
-        return "<<ARGS>>";
+        return "Any";
     }
 
     // Tuple structs
@@ -383,8 +484,13 @@ pub fn buildMlDoc(
                     need_comma = true;
                 }
 
-                if (params.len >= 1) {
-                    const ArgsWrapperType = params[0].type.?;
+                // Args param follows self/cls: index 0 for module funcs and static methods
+                const args_param_idx: usize = switch (kind) {
+                    .instance_method, .class_method => 1,
+                    .module_func, .static_method => 0,
+                };
+                if (params.len > args_param_idx) {
+                    const ArgsWrapperType = params[args_param_idx].type.?;
                     if (@typeInfo(ArgsWrapperType) == .@"struct" and @hasDecl(ArgsWrapperType, "ArgsStruct")) {
                         const ArgsStructType = ArgsWrapperType.ArgsStruct;
                         const args_fields = @typeInfo(ArgsStructType).@"struct".fields;
@@ -394,9 +500,7 @@ pub fn buildMlDoc(
                                 result = result ++ ", ";
                             }
                             result = result ++ field.name;
-                            if (field.default_value_ptr != null or @typeInfo(field.type) == .optional) {
-                                result = result ++ "=None";
-                            }
+                            if (argDefaultLiteral(field)) |default| result = result ++ "=" ++ default;
                             need_comma = true;
                         }
                     }
@@ -551,7 +655,7 @@ pub fn generateImports(comptime config: anytype) []const u8 {
     @setEvalBranchQuota(std.math.maxInt(u32));
     comptime {
         var result: []const u8 = "\"\"\"Type stubs generated by PyOZ\"\"\"\n\n";
-        result = result ++ "from typing import Any, Iterable, Iterator, overload\n";
+        result = result ++ "from typing import Any, Awaitable, Generator, Iterable, Iterator, overload\n";
 
         // Check if we need specific imports based on types used
         var needs_datetime = false;
@@ -699,39 +803,8 @@ pub fn generateFunctionStub(
 
         switch (kwargs_mode) {
             .args_struct => {
-                if (params.len == 1) {
-                    // Named kwargs - expand the Args struct
-                    const ArgsWrapperType = params[0].type.?;
-                    if (@typeInfo(ArgsWrapperType) == .@"struct" and @hasDecl(ArgsWrapperType, "ArgsStruct")) {
-                        const ArgsStructType = ArgsWrapperType.ArgsStruct;
-                        const args_fields = @typeInfo(ArgsStructType).@"struct".fields;
-
-                        var first = true;
-                        for (args_fields) |field| {
-                            if (!first) {
-                                result = result ++ ", ";
-                            }
-                            first = false;
-
-                            result = result ++ field.name ++ ": ";
-
-                            // Check if optional
-                            const field_info = @typeInfo(field.type);
-                            if (field_info == .optional) {
-                                result = result ++ zigTypeToPython(field_info.optional.child) ++ " | None";
-                            } else {
-                                result = result ++ zigTypeToPython(field.type);
-                            }
-
-                            // Check for default value
-                            if (field.default_value_ptr != null) {
-                                result = result ++ " = ...";
-                            } else if (field_info == .optional) {
-                                result = result ++ " = None";
-                            }
-                        }
-                    }
-                }
+                // Named kwargs - expand the Args struct
+                if (params.len == 1) result = result ++ argsStubParams(params[0].type.?);
             },
             .auto_kwargs => {
                 // Auto kwargs: required params positional, ?T params keyword-capable
@@ -748,7 +821,7 @@ pub fn generateFunctionStub(
                                 getParamName(pn, arg_idx)
                             else
                                 std.fmt.comptimePrint("arg{d}", .{arg_idx});
-                            result = result ++ pname ++ ": " ++ zigTypeToPython(ptype);
+                            result = result ++ pname ++ ": " ++ zigParamTypeToPython(ptype);
                             has_required = true;
                         }
                         arg_idx += 1;
@@ -781,7 +854,7 @@ pub fn generateFunctionStub(
                                 else
                                     std.fmt.comptimePrint("arg{d}", .{arg_idx});
                                 const inner_type = @typeInfo(ptype).optional.child;
-                                result = result ++ pname ++ ": " ++ zigTypeToPython(inner_type) ++ " | None = None";
+                                result = result ++ pname ++ ": " ++ zigParamTypeToPython(inner_type) ++ " | None = None";
                             }
                             arg_idx += 1;
                         }
@@ -801,7 +874,7 @@ pub fn generateFunctionStub(
                             getParamName(pn, arg_idx)
                         else
                             std.fmt.comptimePrint("arg{d}", .{arg_idx});
-                        result = result ++ pname ++ ": " ++ zigTypeToPython(ptype);
+                        result = result ++ pname ++ ": " ++ zigParamTypeToPython(ptype);
                         arg_idx += 1;
                     }
                 }
@@ -1071,7 +1144,7 @@ pub fn generateClassStub(comptime name: []const u8, comptime T: type, comptime b
                         getParamName(call_params_str, cidx)
                     else
                         std.fmt.comptimePrint("arg{d}", .{cidx});
-                    result = result ++ ", " ++ pname ++ ": " ++ zigTypeToPython(ptype);
+                    result = result ++ ", " ++ pname ++ ": " ++ zigParamTypeToPython(ptype);
                     cidx += 1;
                 }
             }
@@ -1164,6 +1237,27 @@ pub fn generateClassStub(comptime name: []const u8, comptime T: type, comptime b
             result = result ++ "    def __exit__(self, exc_type: type[BaseException] | None, exc_val: BaseException | None, exc_tb: Any) -> bool | None: ...\n";
         }
 
+        // Async protocols
+        if (@hasDecl(T, "__aiter__")) {
+            const R = @typeInfo(@TypeOf(@field(T, "__aiter__"))).@"fn".return_type.?;
+            const V = if (@typeInfo(R) == .error_union) @typeInfo(R).error_union.payload else R;
+            const ret = if (@typeInfo(V) == .pointer and @typeInfo(V).pointer.child == T) name else zigTypeToPython(V);
+            result = result ++ "    def __aiter__(self) -> " ++ ret ++ ": ...\n";
+        }
+        if (@hasDecl(T, "__anext__")) {
+            result = result ++ "    async def __anext__(self) -> " ++ asyncResultStub(name, T, "__anext__", .anext) ++ ": ...\n";
+        }
+        if (@hasDecl(T, "__await__")) {
+            result = result ++ "    def __await__(self) -> Generator[Any, Any, " ++ asyncResultStub(name, T, "__await__", .value) ++ "]: ...\n";
+        }
+        if (@hasDecl(T, "__aenter__")) {
+            result = result ++ "    async def __aenter__(self) -> " ++ asyncResultStub(name, T, "__aenter__", .value) ++ ": ...\n";
+        }
+        if (@hasDecl(T, "__aexit__")) {
+            result = result ++ "    async def __aexit__(self, exc_type: type[BaseException] | None, exc_val: BaseException | None, exc_tb: Any) -> " ++
+                asyncResultStub(name, T, "__aexit__", .value) ++ ": ...\n";
+        }
+
         result = result ++ "\n";
 
         return result;
@@ -1208,8 +1302,12 @@ fn generateMethodStub(comptime name: []const u8, comptime Fn: type, comptime Cla
                 // Static method
                 result = result ++ "    @staticmethod\n    def " ++ name ++ "(";
                 // First param is not self, include it
-                const p0name = if (has_param_names) getParamName(param_names_str, 0) else "arg0";
-                result = result ++ p0name ++ ": " ++ zigTypeToPython(first_param);
+                if (isArgsType(first_param)) {
+                    result = result ++ argsStubParams(first_param);
+                } else {
+                    const p0name = if (has_param_names) getParamName(param_names_str, 0) else "arg0";
+                    result = result ++ p0name ++ ": " ++ zigTypeToPython(first_param);
+                }
             }
 
             // Rest of parameters
@@ -1218,11 +1316,15 @@ fn generateMethodStub(comptime name: []const u8, comptime Fn: type, comptime Cla
 
             for (params[start_idx..]) |param| {
                 if (param.type) |ptype| {
+                    if (isArgsType(ptype)) {
+                        result = result ++ ", " ++ argsStubParams(ptype);
+                        continue;
+                    }
                     const pname = if (has_param_names)
                         getParamName(param_names_str, param_idx)
                     else
                         std.fmt.comptimePrint("arg{d}", .{param_idx});
-                    result = result ++ ", " ++ pname ++ ": " ++ zigTypeToPython(ptype);
+                    result = result ++ ", " ++ pname ++ ": " ++ zigParamTypeToPython(ptype);
                     param_idx += 1;
                 }
             }
@@ -1403,7 +1505,7 @@ pub fn generateModuleStubs(comptime config: anytype) []const u8 {
                 @TypeOf(f.func),
                 if (f.doc) |d| std.mem.span(d) else null,
                 mode,
-                null,
+                if (@hasField(@TypeOf(f), "params")) f.params else null,
             );
         }
 

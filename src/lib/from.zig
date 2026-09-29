@@ -477,7 +477,8 @@ pub fn isStringConstType(comptime T: type) bool {
 // =============================================================================
 
 /// Check if a function takes pyoz.Args(T) as its first (and only) parameter.
-/// This means it uses named keyword arguments.
+/// This means it uses named keyword arguments. (Methods are detected by the
+/// class method builder, since their Args parameter follows `self`/`cls`.)
 pub fn isNamedKwargsFunc(comptime Fn: type) bool {
     const info = @typeInfo(Fn);
     if (info != .@"fn") return false;

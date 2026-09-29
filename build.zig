@@ -7,8 +7,12 @@ const PythonConfig = struct {
     version_major: u8,
     version_minor: u8,
     include_dir: []const u8,
+    /// Real pyconfig.h when it lives outside include_dir (Debian/Ubuntu multiarch)
+    config_h: ?[]const u8 = null,
     lib_dir: ?[]const u8,
     lib_name: []const u8,
+    /// Free-threaded (PEP 703) interpreter, e.g. python3.14t
+    gil_disabled: bool = false,
 };
 
 /// Get the Python executable name for the current platform
@@ -25,7 +29,7 @@ fn detectPython(b: *std.Build) ?PythonConfig {
     const version_result = b.runAllowFail(
         &.{ python_cmd, "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" },
         &out_code,
-        .Inherit,
+        .inherit,
     ) catch return null;
     if (out_code != 0) return null;
     const version = std.mem.trim(u8, version_result, &std.ascii.whitespace);
@@ -42,12 +46,26 @@ fn detectPython(b: *std.Build) ?PythonConfig {
     const include_result = b.runAllowFail(
         &.{ python_cmd, "-c", "import sysconfig; print(sysconfig.get_path('include'))" },
         &out_code,
-        .Inherit,
+        .inherit,
     ) catch return null;
     if (out_code != 0) return null;
 
     const include_dir = std.mem.trim(u8, include_result, &std.ascii.whitespace);
     if (include_dir.len == 0) return null;
+
+    // Debian/Ubuntu ship a dispatching include/pythonX.Y/pyconfig.h that pulls
+    // the real one from the multiarch directory via the system include path,
+    // which Zig only searches for native targets.
+    var config_h: ?[]const u8 = null;
+    if (b.runAllowFail(&.{
+        python_cmd,
+        "-c",
+        "import sysconfig as s,os;i=s.get_path('include');m=s.get_config_var('MULTIARCH') or '';" ++
+            "p=os.path.join(os.path.dirname(i),m,os.path.basename(i),'pyconfig.h');print(p if m and os.path.isfile(p) else '')",
+    }, &out_code, .inherit)) |r| {
+        const path = std.mem.trim(u8, r, &std.ascii.whitespace);
+        if (out_code == 0 and path.len > 0) config_h = path;
+    } else |_| {}
 
     // Get library directory using sysconfig (cross-platform)
     var lib_dir: ?[]const u8 = null;
@@ -55,7 +73,7 @@ fn detectPython(b: *std.Build) ?PythonConfig {
         python_cmd,
         "-c",
         "import sysconfig,sys,os;d=sysconfig.get_config_var('LIBDIR');print(d if d else os.path.join(sys.prefix,'libs' if sys.platform=='win32' else 'lib'))",
-    }, &out_code, .Inherit)) |libdir_result| {
+    }, &out_code, .inherit)) |libdir_result| {
         if (out_code == 0) {
             const libdir_trimmed = std.mem.trim(u8, libdir_result, &std.ascii.whitespace);
             if (libdir_trimmed.len > 0) {
@@ -64,21 +82,28 @@ fn detectPython(b: *std.Build) ?PythonConfig {
         }
     } else |_| {}
 
+    // ABI flags: "t" for free-threaded builds (libpython3.14t / python314t.lib)
+    const abiflags: []const u8 = if (b.runAllowFail(&.{
+        python_cmd, "-c", "import sysconfig;print('t' if sysconfig.get_config_var('Py_GIL_DISABLED') else '')",
+    }, &out_code, .inherit)) |r| std.mem.trim(u8, r, &std.ascii.whitespace) else |_| "";
+
     // Construct library name based on platform
     const lib_name = if (builtin.os.tag == .windows)
-        // Windows uses python<major><minor> (no dot), e.g., python313
-        std.fmt.allocPrint(b.allocator, "python{d}{d}", .{ version_major, version_minor }) catch return null
+        // Windows uses python<major><minor>[t] (no dot), e.g., python313, python314t
+        std.fmt.allocPrint(b.allocator, "python{d}{d}{s}", .{ version_major, version_minor, abiflags }) catch return null
     else
-        // Unix uses python<major>.<minor>, e.g., python3.13
-        std.fmt.allocPrint(b.allocator, "python{s}", .{version}) catch return null;
+        // Unix uses python<major>.<minor>[t], e.g., python3.13, python3.14t
+        std.fmt.allocPrint(b.allocator, "python{s}{s}", .{ version, abiflags }) catch return null;
 
     return PythonConfig{
         .version = version,
         .version_major = version_major,
         .version_minor = version_minor,
         .include_dir = include_dir,
+        .config_h = config_h,
         .lib_dir = lib_dir,
         .lib_name = lib_name,
+        .gil_disabled = abiflags.len > 0,
     };
 }
 
@@ -89,14 +114,27 @@ pub fn build(b: *std.Build) void {
     // Sanitizer option
     const sanitize = b.option(bool, "sanitize", "Enable address sanitizer") orelse false;
 
-    // ABI3 option - hardcoded to Python 3.8 minimum (see src/lib/python/types.zig)
+    // ABI3 option - Python 3.10 minimum (see src/lib/python/types.zig)
     const abi3 = b.option(bool, "abi3", "Enable Python Stable ABI (Limited API) mode") orelse false;
 
     // Optional: override Python include paths (used by pypi/build.zig for cross-compilation)
-    const python_include_dirs: ?[]const []const u8 = b.option([]const []const u8, "python-include-dirs", "Override Python include paths for cross-compilation");
+    const python_include_dirs: ?[]const []const u8 = b.option([]const []const u8, "python-include-dirs", "Override Python include paths for cross-compilation") orelse
+        // `pyoz build` passes the headers for the wheel's target and Python
+        // version this way: -D options don't reach a dependency's build.zig.
+        if (b.graph.environ_map.get("PYOZ_PYTHON_INCLUDE")) |dir| b.allocator.dupe([]const u8, &.{dir}) catch @panic("OOM") else null;
 
     // Detect Python on the system
     const python_config = detectPython(b);
+
+    // CPython's headers reject the Limited API on free-threaded builds; fail
+    // with an actionable message instead of an opaque "C import failed".
+    if (abi3 and python_include_dirs == null) {
+        if (python_config) |pc| if (pc.gil_disabled) {
+            std.log.err("-Dabi3=true cannot target free-threaded Python {s}t: the Stable ABI does not " ++
+                "cover free-threaded builds. Use a regular interpreter for ABI3, or drop -Dabi3.", .{pc.version});
+            std.process.exit(1);
+        };
+    }
 
     if (python_config == null and python_include_dirs == null) {
         if (builtin.os.tag == .windows) {
@@ -138,6 +176,16 @@ pub fn build(b: *std.Build) void {
         }
     } else if (python_config) |python| {
         pyoz_mod.addIncludePath(.{ .cwd_relative = python.include_dir });
+        if (python.config_h) |config_h| {
+            // Serve the dispatcher's `#include <multiarch/pythonX.Y/pyconfig.h>`
+            // from a generated directory holding just that one file.
+            const base = std.fs.path.dirname(python.include_dir) orelse "";
+            if (std.mem.startsWith(u8, config_h, base) and config_h.len > base.len + 1) {
+                const wf = b.addWriteFiles();
+                _ = wf.addCopyFile(.{ .cwd_relative = config_h }, config_h[base.len + 1 ..]);
+                pyoz_mod.addIncludePath(wf.getDirectory());
+            }
+        }
     }
 
     // ========================================================================
@@ -167,11 +215,11 @@ pub fn build(b: *std.Build) void {
     if (python_config) |python| {
         example_user_mod.addIncludePath(.{ .cwd_relative = python.include_dir });
         if (python.lib_dir) |lib_dir| {
-            example_lib.addLibraryPath(.{ .cwd_relative = lib_dir });
+            example_lib.root_module.addLibraryPath(.{ .cwd_relative = lib_dir });
         }
-        example_lib.linkSystemLibrary(python.lib_name);
+        example_lib.root_module.linkSystemLibrary(python.lib_name, .{});
     }
-    example_lib.linkLibC();
+    example_lib.root_module.link_libc = true;
 
     // Install as .so file (Unix) or .pyd file (Windows)
     const ext = if (builtin.os.tag == .windows) ".pyd" else ".so";
@@ -209,11 +257,11 @@ pub fn build(b: *std.Build) void {
     if (python_config) |python| {
         example_abi3_user_mod.addIncludePath(.{ .cwd_relative = python.include_dir });
         if (python.lib_dir) |lib_dir| {
-            example_abi3_lib.addLibraryPath(.{ .cwd_relative = lib_dir });
+            example_abi3_lib.root_module.addLibraryPath(.{ .cwd_relative = lib_dir });
         }
-        example_abi3_lib.linkSystemLibrary(python.lib_name);
+        example_abi3_lib.root_module.linkSystemLibrary(python.lib_name, .{});
     }
-    example_abi3_lib.linkLibC();
+    example_abi3_lib.root_module.link_libc = true;
 
     // Install as .so file (Unix) or .pyd file (Windows)
     const install_example_abi3 = b.addInstallArtifact(example_abi3_lib, .{
@@ -348,14 +396,14 @@ pub fn build(b: *std.Build) void {
 
     // Link against Python for embedding
     if (python_config) |python| {
-        tests.addIncludePath(.{ .cwd_relative = python.include_dir });
+        tests.root_module.addIncludePath(.{ .cwd_relative = python.include_dir });
         tests.root_module.addIncludePath(.{ .cwd_relative = python.include_dir });
         if (python.lib_dir) |lib_dir| {
-            tests.addLibraryPath(.{ .cwd_relative = lib_dir });
+            tests.root_module.addLibraryPath(.{ .cwd_relative = lib_dir });
         }
-        tests.linkSystemLibrary(python.lib_name);
+        tests.root_module.linkSystemLibrary(python.lib_name, .{});
     }
-    tests.linkLibC();
+    tests.root_module.link_libc = true;
 
     const run_tests = b.addRunArtifact(tests);
     // Tests depend on the example module and test stub libs being built first
@@ -391,14 +439,14 @@ pub fn build(b: *std.Build) void {
 
     // Link against Python for embedding
     if (python_config) |python| {
-        tests_abi3.addIncludePath(.{ .cwd_relative = python.include_dir });
+        tests_abi3.root_module.addIncludePath(.{ .cwd_relative = python.include_dir });
         tests_abi3.root_module.addIncludePath(.{ .cwd_relative = python.include_dir });
         if (python.lib_dir) |lib_dir| {
-            tests_abi3.addLibraryPath(.{ .cwd_relative = lib_dir });
+            tests_abi3.root_module.addLibraryPath(.{ .cwd_relative = lib_dir });
         }
-        tests_abi3.linkSystemLibrary(python.lib_name);
+        tests_abi3.root_module.linkSystemLibrary(python.lib_name, .{});
     }
-    tests_abi3.linkLibC();
+    tests_abi3.root_module.link_libc = true;
 
     const run_tests_abi3 = b.addRunArtifact(tests_abi3);
     // ABI3 tests depend on the ABI3 example module being built first
@@ -441,18 +489,18 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    // Add miniz C source (amalgamated single-file version)
-    cli_exe.addCSourceFile(.{
-        .file = b.path("src/miniz/miniz.c"),
-        .flags = &.{"-DMINIZ_NO_STDIO"},
-    });
-    cli_exe.addIncludePath(b.path("src/miniz"));
-    cli_exe.linkLibC();
-
     const install_cli = b.addInstallArtifact(cli_exe, .{});
 
     const cli_step = b.step("cli", "Build the PyOZ CLI tool");
     cli_step.dependOn(&install_cli.step);
+
+    // CLI unit tests (zip/deflate, wheel naming, project scaffolding)
+    const cli_tests = b.addTest(.{ .root_module = cli_exe.root_module });
+    const test_cli_step = b.step("test_cli", "Run the PyOZ CLI unit tests");
+    const run_cli_tests = b.addRunArtifact(cli_tests);
+    // The Zig version pin test reads repository files by relative path
+    run_cli_tests.setCwd(b.path("."));
+    test_cli_step.dependOn(&run_cli_tests.step);
 
     // Run CLI step for quick testing
     const run_cli = b.addRunArtifact(cli_exe);
@@ -504,15 +552,7 @@ pub fn build(b: *std.Build) void {
             }),
         });
 
-        // Add miniz C source for compression support
-        release_exe.addCSourceFile(.{
-            .file = b.path("src/miniz/miniz.c"),
-            .flags = &.{"-DMINIZ_NO_STDIO"},
-        });
-        release_exe.addIncludePath(b.path("src/miniz"));
-
         // Statically link libc for fully static binaries
-        release_exe.linkLibC();
 
         const target_name = b.fmt("pyoz-{s}-{s}{s}", .{
             @tagName(t.cpu_arch.?),

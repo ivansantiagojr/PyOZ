@@ -1,7 +1,7 @@
 //! ABI3-compatible example module
 //!
 //! This example demonstrates features that work in ABI3 (Stable ABI) mode.
-//! Build with: zig build example_abi3 -Dabi3=true -Dabi3-version=3.8
+//! Build with: zig build example_abi3 -Dabi3=true
 //!
 //! Features available in ABI3 mode:
 //! - Module-level functions with basic types (int, float, str, bool)
@@ -961,13 +961,12 @@ fn make_decimal() pyoz.Decimal {
     return pyoz.Decimal.init("123.456789");
 }
 
-fn decimal_double(d: pyoz.Decimal) pyoz.Decimal {
-    if (d.toFloat()) |f| {
-        var buf: [64]u8 = undefined;
-        const result = std.fmt.bufPrint(&buf, "{d}", .{f * 2.0}) catch return d;
-        return pyoz.Decimal.init(result);
-    }
-    return d;
+fn decimal_double(d: pyoz.Decimal) !pyoz.Owned(pyoz.Decimal) {
+    // Heap-allocate the digits: a Decimal over a local buffer would dangle,
+    // because PyOZ converts the return value after this function returns.
+    const alloc = std.heap.smp_allocator;
+    const f = d.toFloat() orelse return error.InvalidDecimal;
+    return pyoz.owned(alloc, pyoz.Decimal.init(try std.fmt.allocPrint(alloc, "{d}", .{f * 2.0})));
 }
 
 // ============================================================================
@@ -1742,11 +1741,57 @@ const MathError = pyoz.exception("MathError", .{ .base = .RuntimeError, .doc = "
 // Module definition
 // ============================================================================
 
+/// Async on the Limited API: sleep on the Io runtime, then add.
+fn async_add(io: std.Io, a: i64, b: i64) !i64 {
+    try io.sleep(.fromMilliseconds(1), .awake);
+    return a + b;
+}
+
+/// Async protocols on the Limited API (tp_as_async via PyType_FromSpec slots).
+/// `async for` yields n-1 .. 0; each item comes from a std.Io task, and the
+/// task returning null ends the iteration.
+fn nextTick(io: std.Io, n: i64) !?i64 {
+    try io.sleep(.fromMilliseconds(1), .awake);
+    return if (n > 0) n - 1 else null;
+}
+const next_tick = pyoz.asyncFn(nextTick);
+
+const AsyncTicker = struct {
+    n: i64,
+
+    pub fn __aiter__(self: *AsyncTicker) *AsyncTicker {
+        return self;
+    }
+
+    pub fn __anext__(self: *AsyncTicker) !pyoz.Future(nextTick) {
+        const current = self.n;
+        if (self.n > 0) self.n -= 1;
+        return next_tick(current);
+    }
+
+    /// `await AsyncTicker(n)` completes immediately with n.
+    pub fn __await__(self: *const AsyncTicker) i64 {
+        return self.n;
+    }
+
+    pub fn __aenter__(self: *AsyncTicker) *AsyncTicker {
+        return self;
+    }
+
+    pub fn __aexit__(self: *AsyncTicker, exc_type: ?*pyoz.PyObject, exc: ?*pyoz.PyObject, tb: ?*pyoz.PyObject) void {
+        _ = exc_type;
+        _ = exc;
+        _ = tb;
+        self.n = -1;
+    }
+};
+
 pub const Abi3Example = pyoz.module(.{
     .name = "example_abi3",
     .doc = "ABI3-compatible example module demonstrating Stable ABI features",
     .funcs = &.{
         // Basic arithmetic
+        pyoz.func("async_add", pyoz.asyncFn(async_add), "await: a+b (ABI3)"),
         pyoz.func("add", add, "Add two integers"),
         pyoz.func("multiply", multiply, "Multiply two floats"),
         pyoz.func("divide", divide, "Divide two floats (returns None if divisor is 0)"),
@@ -1859,6 +1904,7 @@ pub const Abi3Example = pyoz.module(.{
     },
     .classes = &.{
         pyoz.class("Counter", Counter),
+        pyoz.class("AsyncTicker", AsyncTicker),
         pyoz.class("Point", Point),
         pyoz.class("Number", Number),
         pyoz.class("Version", Version),

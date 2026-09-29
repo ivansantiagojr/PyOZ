@@ -1,6 +1,6 @@
 # ABI3 (Stable ABI)
 
-Python's Stable ABI (ABI3) allows building extensions that work across multiple Python versions without recompilation. A single wheel built for Python 3.8 works on 3.9, 3.10, 3.11, 3.12, 3.13, and future versions.
+Python's Stable ABI (ABI3) allows building extensions that work across multiple Python versions without recompilation. A single wheel built for Python 3.10 works on 3.11, 3.12, 3.13, 3.14 and future versions.
 
 ## Enabling ABI3
 
@@ -11,7 +11,7 @@ Enable via build flag (`zig build -Dabi3=true`) or in pyproject.toml:
 abi3 = true
 ```
 
-When enabled, PyOZ uses only stable ABI functions (`Py_LIMITED_API = 0x03080000`) and generates wheels with `cp38-abi3-platform` tags.
+When enabled, PyOZ uses only stable ABI functions (`Py_LIMITED_API = 0x030A0000`) and generates wheels with `cp310-abi3-platform` tags.
 
 ## What Works in ABI3
 
@@ -70,7 +70,7 @@ The following features are **not available** in ABI3 mode:
 
 ## Wheel Distribution
 
-ABI3 wheels use tags like `cp38-abi3-linux_x86_64` indicating compatibility with Python 3.8 and all later versions. This means:
+ABI3 wheels use tags like `cp310-abi3-manylinux_2_17_x86_64` indicating compatibility with Python 3.10 and all later versions. This means:
 
 - One wheel per platform instead of one per Python version
 - Automatic compatibility with future Python releases

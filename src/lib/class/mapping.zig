@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const py = @import("../python.zig");
+const ft = @import("threading.zig");
 const conversion = @import("../conversion.zig");
 const slots = @import("../python/slots.zig");
 const abi = @import("../abi.zig");
@@ -28,9 +29,9 @@ pub fn MappingProtocol(comptime _: [*:0]const u8, comptime T: type, comptime Par
         fn makeMappingMethods() py.PyMappingMethods {
             var mm: py.PyMappingMethods = std.mem.zeroes(py.PyMappingMethods);
 
-            if (@hasDecl(T, "__len__")) mm.mp_length = @ptrCast(&py_mp_length);
-            if (@hasDecl(T, "__getitem__")) mm.mp_subscript = @ptrCast(&py_mp_subscript);
-            if (@hasDecl(T, "__setitem__") or @hasDecl(T, "__delitem__")) mm.mp_ass_subscript = @ptrCast(&py_mp_ass_subscript);
+            if (@hasDecl(T, "__len__")) mm.mp_length = @ptrCast(ft.locked(T, py_mp_length));
+            if (@hasDecl(T, "__getitem__")) mm.mp_subscript = @ptrCast(ft.locked(T, py_mp_subscript));
+            if (@hasDecl(T, "__setitem__") or @hasDecl(T, "__delitem__")) mm.mp_ass_subscript = @ptrCast(ft.locked(T, py_mp_ass_subscript));
 
             return mm;
         }
@@ -260,15 +261,15 @@ pub fn MappingProtocol(comptime _: [*:0]const u8, comptime T: type, comptime Par
             var idx = start_idx;
 
             if (@hasDecl(T, "__len__")) {
-                slot_array[idx] = .{ .slot = slots.mp_length, .pfunc = @ptrCast(@constCast(&py_mp_length)) };
+                slot_array[idx] = .{ .slot = slots.mp_length, .pfunc = @ptrCast(@constCast(ft.locked(T, py_mp_length))) };
                 idx += 1;
             }
             if (@hasDecl(T, "__getitem__")) {
-                slot_array[idx] = .{ .slot = slots.mp_subscript, .pfunc = @ptrCast(@constCast(&py_mp_subscript)) };
+                slot_array[idx] = .{ .slot = slots.mp_subscript, .pfunc = @ptrCast(@constCast(ft.locked(T, py_mp_subscript))) };
                 idx += 1;
             }
             if (@hasDecl(T, "__setitem__") or @hasDecl(T, "__delitem__")) {
-                slot_array[idx] = .{ .slot = slots.mp_ass_subscript, .pfunc = @ptrCast(@constCast(&py_mp_ass_subscript)) };
+                slot_array[idx] = .{ .slot = slots.mp_ass_subscript, .pfunc = @ptrCast(@constCast(ft.locked(T, py_mp_ass_subscript))) };
                 idx += 1;
             }
 
