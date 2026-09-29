@@ -237,8 +237,9 @@ jobs:
                   cd demo
                   "$PYOZ" build --release
                   ls dist
+                  # manylinux_* is portable; a bare linux_* tag is not
                   case "$(ls dist)" in
-                      *linux_*) echo "Linux wheel is not portable"; exit 1 ;;
+                      *-linux_*) echo "Linux wheel is not portable"; exit 1 ;;
                   esac
                   python -m pip install dist/*.whl
                   (cd / && python -c "import demo; assert demo.add(2, 3) == 5; print('ok')")

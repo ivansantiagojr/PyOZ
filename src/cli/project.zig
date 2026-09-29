@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const version = @import("version");
 pub const toml = @import("toml.zig");
 const sys = @import("sys.zig");
@@ -250,56 +251,79 @@ fn writeTemplate(
 
 /// Compute relative path from `from_path` to `to_path`
 fn computeRelativePath(allocator: std.mem.Allocator, from_path: []const u8, to_path: []const u8) ![]const u8 {
-    // Split paths into components
+    return relativePath(allocator, from_path, to_path, builtin.os.tag == .windows);
+}
+
+/// Relative path from `from_path` to `to_path` (both absolute), always with
+/// '/' separators: build.zig.zon strings then need no escaping, and Zig
+/// accepts '/' on Windows. Windows paths compare case-insensitively; on
+/// different drives there is no relative path, so `to_path` is returned.
+fn relativePath(allocator: std.mem.Allocator, from_path: []const u8, to_path: []const u8, windows: bool) ![]const u8 {
+    const seps = if (windows) "/\\" else "/";
     var from_parts: std.ArrayList([]const u8) = .empty;
     defer from_parts.deinit(allocator);
     var to_parts: std.ArrayList([]const u8) = .empty;
     defer to_parts.deinit(allocator);
 
-    var from_it = std.mem.splitScalar(u8, from_path, '/');
-    while (from_it.next()) |part| {
-        if (part.len > 0) try from_parts.append(allocator, part);
-    }
+    var from_it = std.mem.tokenizeAny(u8, from_path, seps);
+    while (from_it.next()) |part| try from_parts.append(allocator, part);
+    var to_it = std.mem.tokenizeAny(u8, to_path, seps);
+    while (to_it.next()) |part| try to_parts.append(allocator, part);
 
-    var to_it = std.mem.splitScalar(u8, to_path, '/');
-    while (to_it.next()) |part| {
-        if (part.len > 0) try to_parts.append(allocator, part);
+    const eql = struct {
+        fn f(win: bool, a: []const u8, b: []const u8) bool {
+            return if (win) std.ascii.eqlIgnoreCase(a, b) else std.mem.eql(u8, a, b);
+        }
+    }.f;
+
+    var result: std.ArrayList(u8) = .empty;
+    errdefer result.deinit(allocator);
+
+    // Different drives (D: vs C:): use the absolute path
+    if (windows and (from_parts.items.len == 0 or to_parts.items.len == 0 or !eql(true, from_parts.items[0], to_parts.items[0]))) {
+        for (to_path) |c| try result.append(allocator, if (c == '\\') '/' else c);
+        return result.toOwnedSlice(allocator);
     }
 
     // Find common prefix length
     var common: usize = 0;
     while (common < from_parts.items.len and common < to_parts.items.len) {
-        if (!std.mem.eql(u8, from_parts.items[common], to_parts.items[common])) break;
+        if (!eql(windows, from_parts.items[common], to_parts.items[common])) break;
         common += 1;
     }
 
-    // Build relative path: go up from `from`, then down to `to`
-    var result: std.ArrayList(u8) = .empty;
-    errdefer result.deinit(allocator);
-
-    // Add "../" for each remaining component in from_path
-    const ups = from_parts.items.len - common;
-    for (0..ups) |_| {
-        try result.appendSlice(allocator, "../");
-    }
-
-    // Add remaining components from to_path
+    // Go up from `from`, then down to `to`
+    for (0..from_parts.items.len - common) |_| try result.appendSlice(allocator, "../");
     for (to_parts.items[common..], 0..) |part, i| {
         if (i > 0) try result.append(allocator, '/');
         try result.appendSlice(allocator, part);
     }
 
-    // Handle edge case where result is empty (same directory)
-    if (result.items.len == 0) {
-        try result.append(allocator, '.');
-    }
+    // Same directory
+    if (result.items.len == 0) try result.append(allocator, '.');
 
     // Remove trailing slash if present
-    if (result.items.len > 1 and result.items[result.items.len - 1] == '/') {
-        _ = result.pop();
-    }
+    if (result.items.len > 1 and result.items[result.items.len - 1] == '/') _ = result.pop();
 
     return result.toOwnedSlice(allocator);
+}
+
+test relativePath {
+    const a = std.testing.allocator;
+    const cases = [_]struct { from: []const u8, to: []const u8, win: bool, want: []const u8 }{
+        .{ .from = "/home/u/proj/demo", .to = "/home/u/PyOZ", .win = false, .want = "../../PyOZ" },
+        .{ .from = "/tmp/x", .to = "/home/y", .win = false, .want = "../../home/y" },
+        .{ .from = "/a/b", .to = "/a/b", .win = false, .want = "." },
+        // The CI failure: "../D:\\a\\PyOZ\\PyOZ" with unescaped backslashes
+        .{ .from = "D:\\a\\PyOZ\\wheel-proj\\demo", .to = "D:\\a\\PyOZ\\PyOZ", .win = true, .want = "../../PyOZ" },
+        .{ .from = "c:\\Users\\Me\\demo", .to = "C:\\users\\me\\PyOZ", .win = true, .want = "../PyOZ" },
+        .{ .from = "C:\\work\\demo", .to = "D:\\src\\PyOZ", .win = true, .want = "D:/src/PyOZ" },
+    };
+    for (cases) |c| {
+        const got = try relativePath(a, c.from, c.to, c.win);
+        defer a.free(got);
+        try std.testing.expectEqualStrings(c.want, got);
+    }
 }
 
 /// Pin the PyOZ dependency hash with the official `zig fetch --save`, which
