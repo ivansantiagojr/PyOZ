@@ -148,6 +148,30 @@ Python: `p.translate(dx=3.0)`, `p.translate(1.0, 2.0)`, or `p.translate()`
 
 Struct fields with defaults become optional keyword arguments,
 same as [module-level keyword functions](functions.md#keyword-arguments-pyozkwfunc).
+Optional fields (`?T`) default to `None`.
+
+Static and class methods work the same way:
+
+```zig
+/// Point.on_axis(y=3)
+pub fn on_axis(args: pyoz.Args(struct { x: f64 = 0, y: f64 = 0 })) Point {
+    return .{ .x = args.value.x, .y = args.value.y };
+}
+
+/// Point.polar(r=2, scale=1.5)
+pub fn polar(comptime cls: type, args: pyoz.Args(struct { r: f64, theta: f64 = 0, scale: ?f64 = null })) Point {
+    _ = cls;
+    const k = args.value.scale orelse 1.0;
+    return .{ .x = args.value.r * k * @cos(args.value.theta), .y = args.value.r * k * @sin(args.value.theta) };
+}
+```
+
+`pyoz.Args(...)` must be the only parameter after `self` / `cls`; put every
+Python-visible argument in the struct. `help()` shows the defaults
+(`translate(self, /, dx=0.0, dy=0.0)`), the stub lists the fields
+(`def translate(self, dx: float = ..., dy: float = ...) -> None`), and wrong
+calls raise the same `TypeError`s as Python functions, e.g.
+`translate() got an unexpected keyword argument 'dz'`.
 
 ## Docstrings
 

@@ -1972,6 +1972,66 @@ test "fn calculate_named - keyword arguments with operations" {
     try std.testing.expectApproxEqAbs(@as(f64, 2.5), try python.eval(f64, "example.calculate_named(x=10, y=4, operation='div')"), 0.0001);
 }
 
+test "pyoz.Args on static and class methods" {
+    const python = try initTestPython();
+    try python.exec("q = example.Point.on_axis(y=3.0)");
+    try std.testing.expectEqual(@as(f64, 0.0), try python.eval(f64, "q.x"));
+    try std.testing.expectEqual(@as(f64, 3.0), try python.eval(f64, "q.y"));
+    try python.exec("r = example.Point.polar(2.0, scale=1.5)");
+    try std.testing.expectApproxEqAbs(@as(f64, 3.0), try python.eval(f64, "r.x"), 1e-9);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.0), try python.eval(f64, "r.y"), 1e-9);
+    try python.exec("r2 = example.Point(0.0, 0.0).polar(r=1.0)"); // via an instance
+    try std.testing.expectApproxEqAbs(@as(f64, 1.0), try python.eval(f64, "r2.x"), 1e-9);
+}
+
+test "pyoz.Args - CPython-style argument errors" {
+    const python = try initTestPython();
+    try python.exec(
+        \\def _pyoz_err(f):
+        \\    try:
+        \\        f(); return "no error"
+        \\    except TypeError as e:
+        \\        return str(e)
+        \\_p = example.Point(0.0, 0.0)
+    );
+    const cases = [_][2][]const u8{
+        .{ "_p.translate(dz=1)", "translate() got an unexpected keyword argument 'dz'" },
+        .{ "_p.translate(1, 2, 3)", "translate() takes at most 2 positional arguments (3 given)" },
+        .{ "_p.translate(1, dx=2)", "translate() got multiple values for argument 'dx'" },
+        .{ "example.Point.polar()", "polar() missing required argument 'r'" },
+        .{ "example.Point.polar(r='x')", "polar() argument 'r' has the wrong type" },
+        .{ "example.greet_named(name='hi', foo=1)", "got an unexpected keyword argument 'foo'" },
+    };
+    for (cases) |c| {
+        var buf: [256]u8 = undefined;
+        const expr = try std.fmt.bufPrintZ(&buf, "_pyoz_err(lambda: {s})", .{c[0]});
+        try std.testing.expectEqualStrings(c[1], try python.eval([]const u8, expr));
+    }
+}
+
+test "pyoz.Args - help() shows real defaults, stubs expand the fields" {
+    const python = try initTestPython();
+    try python.exec("import inspect");
+    try std.testing.expectEqualStrings("(self, /, dx=0.0, dy=0.0)", try python.eval([]const u8, "str(inspect.signature(example.Point.translate))"));
+    try std.testing.expectEqualStrings("(r, theta=0.0, scale=None)", try python.eval([]const u8, "str(inspect.signature(example.Point.polar))"));
+    try std.testing.expectEqualStrings("(name, greeting='Hello', times=1, excited=False)", try python.eval([]const u8, "str(inspect.signature(example.greet_named))"));
+
+    const stubs_opt = symreader.extractStubs(std.testing.io, std.testing.allocator, "zig-out/lib/example.so") catch null;
+    const stubs = stubs_opt orelse return error.SkipZigTest;
+    defer std.testing.allocator.free(stubs);
+    for ([_][]const u8{
+        "    def translate(self, dx: float = ..., dy: float = ...) -> None: ...",
+        "    @staticmethod\n    def on_axis(x: float = ..., y: float = ...) -> Point: ...",
+        "    @classmethod\n    def polar(cls, r: float, theta: float = ..., scale: float | None = ...) -> Point: ...",
+    }) |needle| {
+        if (std.mem.indexOf(u8, stubs, needle) == null) {
+            std.debug.print("missing stub: {s}\n", .{needle});
+            return error.TestUnexpectedResult;
+        }
+    }
+    try std.testing.expect(std.mem.indexOf(u8, stubs, "<<ARGS>>") == null);
+}
+
 test "fn greet_named - fromPy exception not overwritten" {
     const python = try initTestPython();
 
