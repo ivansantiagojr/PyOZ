@@ -29,7 +29,7 @@ Point the dependency at the latest 0.13 release and refresh its hash with `zig f
 which rewrites `build.zig.zon` for you:
 
 ```bash
-zig fetch --save=PyOZ https://github.com/pyozig/PyOZ/archive/refs/tags/v0.13.1.tar.gz
+zig fetch --save=PyOZ https://github.com/pyozig/PyOZ/archive/refs/tags/v0.13.2.tar.gz
 ```
 
 Then declare the minimum Zig version, so older compilers fail with a clear
@@ -92,7 +92,7 @@ lib.linkSystemLibrary(lib_name);
 ```zig
 // After (0.13)
 user_lib_mod.addLibraryPath(.{ .cwd_relative = lib_dir });
-user_lib_mod.linkSystemLibrary(lib_name, .{});
+user_lib_mod.linkSystemLibrary(lib_name, .{ .use_pkg_config = .no }); // skip host pkg-config
 ```
 
 The same applies to anything else you added on `lib`: `addIncludePath`,

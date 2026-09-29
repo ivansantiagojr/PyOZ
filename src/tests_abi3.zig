@@ -1738,6 +1738,20 @@ test "abi3 - exception mapping - ComputeError custom exception" {
     try std.testing.expect(try python.eval(bool, "is_exc"));
 }
 
+test "abi3 - class returned by value from a function runs __del__" {
+    const python = try initTestPython();
+
+    try python.exec(
+        \\before = example_abi3.del_counter_deleted_count()
+        \\for i in range(1000):
+        \\    c = example_abi3.make_del_counter(i)
+        \\    assert c.value == i
+        \\    del c
+        \\returned_value_del_ran = example_abi3.del_counter_deleted_count() == before + 1000
+    );
+    try std.testing.expect(try python.eval(bool, "returned_value_del_ran"));
+}
+
 test "abi3 - FailingResource failed __new__ does not call __del__" {
     const python = try initTestPython();
 

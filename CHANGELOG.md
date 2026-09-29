@@ -5,6 +5,12 @@ All notable changes to PyOZ will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.2] - 2026-09-29
+
+### Fixed
+- **`__del__` never ran for class instances returned from Zig functions**, so their resources leaked. `toPy` created them with `PyObject_New`, which left the wrapper uninitialized, including the flag that gates `__del__`. They now go through the class's `tp_new`, like `Cls()`: the freelist is used, `__dict__`/`__weakref__` slots are zeroed and `__del__` runs.
+- **Cross-building Windows wheels from Linux failed to link** (`undefined symbol: Py_IncRef` and similar). Zig's `linkSystemLibrary` asks the host's pkg-config first, which answered for the Linux `python3` and dropped the Windows import library. The `build.zig` template now passes `.use_pkg_config = .no`; existing projects should make the same one-line change.
+
 ## [0.13.1] - 2026-09-29
 
 ### Fixed
