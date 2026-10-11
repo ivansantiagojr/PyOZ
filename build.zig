@@ -510,9 +510,7 @@ pub fn build(b: *std.Build) void {
     // Run CLI step for quick testing
     const run_cli = b.addRunArtifact(cli_exe);
     run_cli.step.dependOn(&install_cli.step);
-    if (b.args) |args| {
-        run_cli.addArgs(args);
-    }
+    run_cli.addPassthruArgs();
 
     const run_cli_step = b.step("run", "Run the PyOZ CLI tool");
     run_cli_step.dependOn(&run_cli.step);
